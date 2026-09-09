@@ -182,7 +182,8 @@ def main() -> int:
     final = max(results)
     log(f"BEST step {best} (final was {final}); "
         f"attack_success {results[best]['attack_success']:.3f} vs {results[final]['attack_success']:.3f}")
-    payload = dict(role=args.role, ckpt_dir=str(args.ckpt_dir), n_prompts=args.n_prompts,
+    payload = dict(role=args.role, ckpt_dir=str(args.ckpt_dir), opponent=str(args.opponent),
+                   n_prompts=args.n_prompts,
                    offset=args.offset, per_step=results, untrained_control=control,
                    best_step=best, final_step=final,
                    best_checkpoint=str(args.ckpt_dir / f"global_step{best}_hf"))
