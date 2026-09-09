@@ -101,10 +101,18 @@ def main() -> int:
         req = None if adapter in (None, "base") else LoRARequest(f"sel{lora_id}", lora_id, str(adapter))
         return [o.outputs[0].text for o in llm.generate(prompts, sp, lora_request=req)]
 
+    # The untrained role is measured alongside the candidates as a control.  It
+    # is never selectable; it exists so a flat candidate curve can be read.  A1
+    # scored a flat 0.297-0.391 across all eleven of its checkpoints while the
+    # same adapter was hugely better than base on training prompts, and without
+    # a base row there is no way to tell "saturated by step 20" from "nothing
+    # transfers off the training prefix".
     results = {}
-    for step, path in steps:
-        atk_adapter = path if args.role == "attacker" else args.opponent
-        def_adapter = args.opponent if args.role == "attacker" else path
+    for step, path in [("base", None)] + steps:
+        is_control = step == "base"
+        role_adapter = None if is_control else path
+        atk_adapter = role_adapter if args.role == "attacker" else args.opponent
+        def_adapter = args.opponent if args.role == "attacker" else role_adapter
         attacks = gen([P._render_attacker_prompt(tok, s) for s in specs],
                       [s["candidate_seed"] for s in specs], atk_adapter, 1)
         parsed = [P.parse_prefilled_cot_completion(t) for t in attacks]
@@ -154,17 +162,29 @@ def main() -> int:
                 f"{empty}/{len(dtexts)} defender responses parsed empty at step {step}; "
                 "selection would be scoring nothing -- refusing to pick a checkpoint"
             )
-        log(f"  step {step:4d}: attack_success={succ:.3f} benign_compliance={comply:.3f} "
+        log(f"  step {str(step):>4}: attack_success={succ:.3f} benign_compliance={comply:.3f} "
             f"empty={empty} parse_err={parse_err}"
+            f"{' (untrained control)' if is_control else ''}"
             f"{'' if eligible else ' (below benign floor, ineligible)'}")
 
+    control = results.pop("base", None)
+    if control is not None:
+        spread = max(v["attack_success"] for v in results.values()) - \
+                 min(v["attack_success"] for v in results.values())
+        lift = max(v["attack_success"] for v in results.values()) - control["attack_success"]
+        log(f"CONTROL untrained={control['attack_success']:.3f}; best candidate is "
+            f"{lift:+.3f} vs it, candidate spread {spread:.3f}")
+        if abs(lift) <= spread:
+            log("  WARNING: the trained lift over base does not exceed the spread "
+                "between checkpoints -- this selection is picking noise")
     usable = {k: v for k, v in results.items() if v["eligible"]} or results
     best = max(usable, key=lambda k: usable[k]["score"])
     final = max(results)
     log(f"BEST step {best} (final was {final}); "
         f"attack_success {results[best]['attack_success']:.3f} vs {results[final]['attack_success']:.3f}")
     payload = dict(role=args.role, ckpt_dir=str(args.ckpt_dir), n_prompts=args.n_prompts,
-                   offset=args.offset, per_step=results, best_step=best, final_step=final,
+                   offset=args.offset, per_step=results, untrained_control=control,
+                   best_step=best, final_step=final,
                    best_checkpoint=str(args.ckpt_dir / f"global_step{best}_hf"))
     out = args.out or (args.ckpt_dir.parent / "checkpoint_selection.json")
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
