@@ -11,6 +11,7 @@ contracts can be tested without loading a model, vLLM, or WildGuard.
 from __future__ import annotations
 
 import hashlib
+import os
 import json
 import math
 import re
@@ -430,9 +431,41 @@ def compute_d1_joint_signed_defender_reward(
     }
 
 
+PROMPT_SELECTION_MODES = ("prefix", "hash")
+
+
+def prompt_selection_mode() -> str:
+    """How a payoff cell picks seed prompts out of the pools.
+
+    ``prefix`` (default) walks the pool in file order, so a cell's prompts are
+    the first N rows of each pool and therefore a strict subset of training's
+    own first-6,400 prefix. ``hash`` is the legacy behaviour: a seeded hash over
+    the whole pool, which spread cell prompts across all 50,050/20,000 rows and
+    left only 13-32% of them inside the training prefix.
+
+    Both modes are deterministic and independent of the cell, so every cell in a
+    matrix still draws the identical prompt sequence (common random numbers).
+    """
+
+    mode = os.environ.get("PSRO_PROMPT_SELECTION", "prefix").strip().lower()
+    if mode not in PROMPT_SELECTION_MODES:
+        raise ValueError(
+            f"PSRO_PROMPT_SELECTION must be one of {PROMPT_SELECTION_MODES}, got {mode!r}"
+        )
+    return mode
+
+
 def _stable_pool_index(seed_base: int, label: str, ordinal: int, size: int) -> int:
     if size <= 0:
         raise ValueError(f"The {label} prompt pool must not be empty")
+    if prompt_selection_mode() == "prefix":
+        if ordinal >= size:
+            raise ValueError(
+                f"prefix prompt selection exhausted the {label} pool: ordinal "
+                f"{ordinal} >= pool size {size}. Reduce the episode count or the "
+                "candidate multiplier, or set PSRO_PROMPT_SELECTION=hash."
+            )
+        return ordinal
     payload = f"upstream-v2-payoff:{seed_base}:{label}:{ordinal}".encode()
     digest = hashlib.sha256(payload).digest()
     return int.from_bytes(digest[:8], "big") % size
@@ -4047,5 +4080,148 @@ def combine_role_convergence(
             "rule": "simultaneous role stability at each consecutive gate",
             "stable_windows": attacker_windows,
             "gates": joint_gates,
+        },
+    }
+
+
+def build_stratified_episode_specs(
+    harmful_rows: Sequence[Mapping[str, Any]],
+    benign_rows: Sequence[Mapping[str, Any]],
+    counts: Mapping[str, int],
+    *,
+    seed_base: int = 8888,
+) -> list[dict[str, Any]]:
+    """Build per-stratum candidate specs without a 1:1 lockstep.
+
+    Every spec is bit-for-bit the spec ``build_interleaved_episode_specs``
+    would have produced at the same stratum ordinal: harmful ordinal ``j`` is
+    interleaved episode ``2 * j`` and benign ordinal ``j`` is ``2 * j + 1``.
+    Asking for unequal counts therefore selects a *subset* of the same
+    candidate universe rather than a different one, which keeps a cell
+    reproducible and keeps every per-stratum prefix nested.
+    """
+
+    pools = {"harmful": harmful_rows, "benign": benign_rows}
+    offsets = {"harmful": 0, "benign": 1}
+    unknown = set(counts) - set(pools)
+    if unknown:
+        raise ValueError(f"unknown strata: {sorted(unknown)}")
+
+    specs: list[dict[str, Any]] = []
+    for label in ("harmful", "benign"):
+        pool = pools[label]
+        if not pool:
+            raise ValueError(f"{label} prompt pool is required")
+        start, count = counts.get(label, (0, 0)) if isinstance(
+            counts.get(label), tuple
+        ) else (0, int(counts.get(label, 0)))
+        for ordinal in range(start, start + count):
+            source_index = _stable_pool_index(
+                seed_base, label, ordinal, len(pool)
+            )
+            raw = pool[source_index]
+            seed_prompt = str(raw.get("vanilla") or raw.get("prompt") or "").strip()
+            if not seed_prompt:
+                raise ValueError(
+                    f"Empty {label} prompt at source index {source_index}"
+                )
+            episode_index = 2 * ordinal + offsets[label]
+            specs.append(
+                {
+                    "episode_index": episode_index,
+                    "episode_seed": seed_base + episode_index,
+                    "prompt_type": f"generated_{label}",
+                    "seed_label": label,
+                    "stratum_ordinal": ordinal,
+                    "source_index": source_index,
+                    "seed_prompt": seed_prompt,
+                }
+            )
+    return specs
+
+
+def assemble_valid_stratified_prefix(
+    candidates: Sequence[Mapping[str, Any]],
+    episodes: int,
+) -> dict[str, Any]:
+    """Select the valid 50/50 prefix from strata generated at unequal depth.
+
+    This is the retention-aware counterpart of
+    ``assemble_valid_interleaved_prefix``.  It accepts candidate sets whose
+    strata were advanced by different amounts, but it still emits an exactly
+    balanced, harmful-first interleaved episode list, so the accepted games are
+    identical to the lockstep result whenever lockstep would have completed.
+    """
+
+    if episodes <= 0 or episodes % 2:
+        raise ValueError("episodes must be positive and even")
+
+    by_label: dict[str, list[Mapping[str, Any]]] = {"harmful": [], "benign": []}
+    for item in candidates:
+        label = item.get("seed_label")
+        if label not in by_label:
+            raise ValueError(f"candidate has unknown seed_label: {label!r}")
+        if item.get("prompt_type") != f"generated_{label}":
+            raise ValueError(
+                f"candidate prompt_type disagrees with seed_label {label!r}"
+            )
+        by_label[label].append(item)
+
+    valid_by_label: dict[str, list[Mapping[str, Any]]] = {}
+    dropped_by_label = {"harmful": 0, "benign": 0}
+    judged_by_label = {"harmful": 0, "benign": 0}
+    for label, rows in by_label.items():
+        ordered = sorted(rows, key=lambda row: int(row["stratum_ordinal"]))
+        ordinals = [int(row["stratum_ordinal"]) for row in ordered]
+        if ordinals != list(range(len(ordered))):
+            raise ValueError(
+                f"{label} candidates must form one contiguous nested prefix"
+            )
+        judged_by_label[label] = len(ordered)
+        kept: list[Mapping[str, Any]] = []
+        for row in ordered:
+            if row.get("dropped_reason"):
+                dropped_by_label[label] += 1
+                continue
+            for reward_key in ("attacker_raw_reward", "defender_raw_reward"):
+                reward = float(row[reward_key])
+                if not math.isfinite(reward):
+                    raise ValueError(
+                        f"Non-finite {reward_key} in {label} stratum"
+                    )
+            kept.append(row)
+        valid_by_label[label] = kept
+
+    required_per_label = episodes // 2
+    deficits = {
+        label: max(0, required_per_label - len(rows))
+        for label, rows in valid_by_label.items()
+    }
+    paired_valid = min(
+        required_per_label,
+        len(valid_by_label["harmful"]),
+        len(valid_by_label["benign"]),
+    )
+    accepted: list[dict[str, Any]] = []
+    for ordinal in range(paired_valid):
+        for label in ("harmful", "benign"):
+            candidate = dict(valid_by_label[label][ordinal])
+            candidate["episode_index"] = len(accepted)
+            candidate["episode_seed"] = int(candidate["candidate_seed"])
+            accepted.append(candidate)
+
+    return {
+        "complete": not any(deficits.values()),
+        "episodes": accepted,
+        "candidate_count": sum(judged_by_label.values()),
+        "judged_counts": judged_by_label,
+        "required_per_stratum": required_per_label,
+        "valid_counts": {
+            label: len(rows) for label, rows in valid_by_label.items()
+        },
+        "deficits": deficits,
+        "dropped_counts": {
+            **dropped_by_label,
+            "total": sum(dropped_by_label.values()),
         },
     }

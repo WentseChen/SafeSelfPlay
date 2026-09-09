@@ -52,12 +52,22 @@ for tag in "${PHASES[@]}"; do
     echo "#SBATCH --error=$LOGDIR/${tag}_%j.err"
     [ -n "$PARTITION" ] && echo "#SBATCH --partition=$PARTITION"
     [ -n "$QOS" ] && echo "#SBATCH --qos=$QOS"
+    [ -n "${NODELIST:-}" ] && echo "#SBATCH --nodelist=$NODELIST"
     echo
     echo "export SSP_ROOT=$SSP_ROOT"
     [ -n "${SSP_WORK:-}" ]     && echo "export SSP_WORK=$SSP_WORK"
     [ -n "${SSP_HF_HOME:-}" ]  && echo "export SSP_HF_HOME=$SSP_HF_HOME"
     [ -n "${SSP_SFT_DIR:-}" ]  && echo "export SSP_SFT_DIR=$SSP_SFT_DIR"
     [ -n "${SSP_PYTHON:-}" ]   && echo "export SSP_PYTHON=$SSP_PYTHON"
+    # Anything that changes the learning problem is forwarded explicitly:
+    # a ladder is only comparable with a PSRO run if these match its contract.
+    for v in GENERATE_MAX_LEN PROMPT_MAX_LEN MICRO_TRAIN MICRO_ROLLOUT \
+             ATTACKER_OBJECTIVE EXACT_LABEL_BALANCE LABEL_DRIFT_POLICY \
+             SAVE_STEPS MAX_CKPT_NUM TRAINING_SEED LORA_RANK LORA_ALPHA \
+             EVAL_STEPS EVAL_START_STEPS DIVERSITY_STEPS WANDB_PROJECT; do
+      eval "val=\${$v:-}"
+      [ -n "$val" ] && echo "export $v=$val"
+    done
     echo "export ROLE=$role GEN=$gen TAG=$tag STEPS=$STEPS GPUS=$GPUS"
     echo "export JUDGE_PORT=$port RAY_PORT=$((port + 1000))"
     if [ -n "$prev_tag" ]; then

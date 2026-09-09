@@ -49,7 +49,9 @@ from modal_upstream_selfredteam_role_lora import (
     hf_cache,
     output_vol,
 )
+from roll.utils.adaptive_stratum_sampling import plan_candidate_wave
 from roll.utils.upstream_v2_payoff import (
+    prompt_selection_mode as _prompt_selection_mode,
     D1_CANONICAL_PARTITION_SEED,
     D1_DEV_PROMPTS_PER_STRATUM,
     D1_FINAL_PAIRED_SEED_BASE,
@@ -62,6 +64,7 @@ from roll.utils.upstream_v2_payoff import (
     assemble_valid_paired_interleaved_prefix,
     assemble_valid_interleaved_prefix,
     build_interleaved_episode_specs,
+    build_stratified_episode_specs,
     build_d1_actual_gate_specs,
     build_d1_canonical_partitions,
     build_d1_exposure_registry,
@@ -649,6 +652,7 @@ def evaluate_upstream_v2_raw_payoff_cell(
     judge_batch_size: int = 64,
     max_new_tokens: int = 2048,
     retention_policy: str = "raw_parseable_v2",
+    adaptive_stratum_sampling: bool = False,
     run_suffix: str = "",
     reuse_source_suffix: str = "",
 ) -> dict[str, Any]:
@@ -932,6 +936,7 @@ def evaluate_upstream_v2_raw_payoff_cell(
         "prompt_distribution": "deterministic exact 50/50 harmful/benign interleave",
         "prompt_dataset_files_sha256": prompt_dataset_files,
         "prompt_dataset_sha256": prompt_dataset_sha256,
+        "prompt_selection": _prompt_selection_mode(),
         "nested_seed_prefix": True,
         "candidate_reuse": reuse_provenance,
         "retention_policy": retention_policy,
@@ -1186,23 +1191,133 @@ def evaluate_upstream_v2_raw_payoff_cell(
         llm = None
         attacker_request = None
         defender_request = None
+        # Frozen-attacker rewrite cache. The attacker moves first against an
+        # empty history and every request carries an explicit seed, so its
+        # rewrite is identical for every defender it is paired with; reusing it
+        # is exact rather than approximate. Disabled by setting
+        # PSRO_ATTACK_CACHE=0.
+        attack_cache = None
+        # The base attacker is cached too: it is the row that appears against
+        # every defender, so it is the single biggest source of duplicated
+        # generation, and its rewrite is exactly as deterministic as a trained
+        # adapter's.
+        if os.environ.get("PSRO_ATTACK_CACHE", "1") != "0":
+            from roll.utils.attack_cache import AttackCache, decoding_fingerprint
+
+            attack_cache = AttackCache(
+                os.environ.get(
+                    "PSRO_ATTACK_CACHE_ROOT", str(PAYOFF_ROOT / "attack_cache")
+                ),
+                attacker_label=str(attacker_meta.get("path") or "base_model"),
+                attacker_sha256=str(attacker_meta.get("sha256") or "base"),
+                base_model=str(LLAMA_ABLITERATED_MODEL),
+                template_sha256=hashlib.sha256(
+                    json.dumps(
+                        {
+                            "render": "_render_attacker_prompt",
+                            "attacker_prompt_profile": "optimized v2",
+                            "prompt_max_tokens": TRAIN_PROMPT_MAX_TOKENS,
+                        },
+                        sort_keys=True,
+                    ).encode()
+                ).hexdigest(),
+                decoding_sha256=decoding_fingerprint(
+                    temperature=1.0,
+                    top_p=1.0,
+                    top_k=-1,
+                    max_new_tokens=max_new_tokens,
+                    min_new_tokens=1,
+                    prompt_max_tokens=TRAIN_PROMPT_MAX_TOKENS,
+                ),
+                seed_scheme="attacker=seed_base+candidate_index",
+                prompt_dataset_sha256=str(prompt_dataset_sha256),
+                seeded=True,
+            )
+            print(
+                f"attack cache: shard {attack_cache.stats()['shard']} with "
+                f"{attack_cache.stats()['entries']} entries at {attack_cache.path}",
+                flush=True,
+            )
         direct_base_defender = raw_defender_path is None
         wave = 0
+        # How deep each stratum has been drawn, so a resumed cell continues its
+        # per-stratum nested prefix rather than restarting it.
+        stratum_cursor = {
+            "harmful": sum(
+                1
+                for row in candidate_rows
+                if row.get("prompt_type") == "generated_harmful"
+            ),
+            "benign": sum(
+                1
+                for row in candidate_rows
+                if row.get("prompt_type") == "generated_benign"
+            ),
+        }
         while not progress["complete"]:
             wave += 1
-            required_pairs = max(progress["deficits"].values())
-            remaining_pairs = (max_candidates - len(candidate_rows)) // 2
-            candidate_pairs = min(
-                required_pairs,
-                remaining_pairs,
-                candidate_wave_pairs,
-            )
-            if candidate_pairs <= 0:
-                raise RuntimeError(
-                    "WildGuard parse-error resampling exhausted the candidate "
-                    f"cap before both strata reached {episodes // 2} valid games: "
-                    f"{progress['deficits']}"
+            if adaptive_stratum_sampling:
+                # Harmful and benign do not retain at the same rate: a benign
+                # seed the attacker rewrites into a harmful prompt is dropped,
+                # while harmful seeds retain almost always.  Drawing in 1:1
+                # lockstep therefore over-generates the harmful stratum by
+                # exactly the benign drop count and can exhaust the cap with
+                # the harmful stratum long since complete.  Size each stratum
+                # by its own observed retention instead.
+                stratum_deficits = {
+                    "harmful": int(
+                        progress["deficits"].get("generated_harmful", 0)
+                    ),
+                    "benign": int(
+                        progress["deficits"].get("generated_benign", 0)
+                    ),
+                }
+                judged_counts = {
+                    "harmful": stratum_cursor["harmful"],
+                    "benign": stratum_cursor["benign"],
+                }
+                valid_counts = progress.get("valid_counts", {}) or {}
+                retained_counts = {
+                    "harmful": int(
+                        valid_counts.get(
+                            "generated_harmful", valid_counts.get("harmful", 0)
+                        )
+                    ),
+                    "benign": int(
+                        valid_counts.get(
+                            "generated_benign", valid_counts.get("benign", 0)
+                        )
+                    ),
+                }
+                plan = plan_candidate_wave(
+                    deficits=stratum_deficits,
+                    judged=judged_counts,
+                    retained=retained_counts,
+                    wave_budget=2 * candidate_wave_pairs,
+                    remaining_budget=max_candidates - len(candidate_rows),
                 )
+                if sum(plan.values()) <= 0:
+                    raise RuntimeError(
+                        "Retention-aware resampling exhausted the candidate "
+                        f"cap before both strata reached {episodes // 2} valid "
+                        f"games: {progress['deficits']}"
+                    )
+                candidate_pairs = 0
+            else:
+                required_pairs = max(progress["deficits"].values())
+                remaining_pairs = (max_candidates - len(candidate_rows)) // 2
+                candidate_pairs = min(
+                    required_pairs,
+                    remaining_pairs,
+                    candidate_wave_pairs,
+                )
+                plan = None
+                if candidate_pairs <= 0:
+                    raise RuntimeError(
+                        "WildGuard parse-error resampling exhausted the candidate "
+                        f"cap before both strata reached {episodes // 2} valid games: "
+                        f"{progress['deficits']}"
+                    )
 
             if llm is None:
                 patched_tokenizer_classes = (
@@ -1262,17 +1377,42 @@ def evaluate_upstream_v2_raw_payoff_cell(
                 )
 
             candidate_start = len(candidate_rows)
-            raw_specs = build_interleaved_episode_specs(
-                harmful_rows,
-                benign_rows,
-                candidate_start + 2 * candidate_pairs,
-                seed_base=seed_base,
-            )[candidate_start:]
+            if adaptive_stratum_sampling:
+                # Every spec is still the spec the interleaved builder would
+                # have produced at the same stratum ordinal, so the candidate
+                # universe and its seeds are unchanged; only how deep each
+                # stratum is drawn differs.
+                raw_specs = build_stratified_episode_specs(
+                    harmful_rows,
+                    benign_rows,
+                    {
+                        "harmful": (stratum_cursor["harmful"], plan["harmful"]),
+                        "benign": (stratum_cursor["benign"], plan["benign"]),
+                    },
+                    seed_base=seed_base,
+                )
+                stratum_cursor["harmful"] += plan["harmful"]
+                stratum_cursor["benign"] += plan["benign"]
+            else:
+                raw_specs = build_interleaved_episode_specs(
+                    harmful_rows,
+                    benign_rows,
+                    candidate_start + 2 * candidate_pairs,
+                    seed_base=seed_base,
+                )[candidate_start:]
             specs = []
-            for raw_spec in raw_specs:
+            for offset, raw_spec in enumerate(raw_specs):
                 spec = dict(raw_spec)
-                spec["candidate_index"] = spec.pop("episode_index")
                 spec["candidate_seed"] = spec.pop("episode_seed")
+                episode_index = spec.pop("episode_index")
+                # The retained-prefix assembler requires candidate_index to be
+                # the position in the durable list; the interleaved builder
+                # already satisfies that, the stratified one must be renumbered.
+                spec["candidate_index"] = (
+                    candidate_start + offset
+                    if adaptive_stratum_sampling
+                    else episode_index
+                )
                 specs.append(spec)
 
             status_path.write_text(
@@ -1293,20 +1433,61 @@ def evaluate_upstream_v2_raw_payoff_cell(
             attacker_prompts = [
                 _render_attacker_prompt(tokenizer, spec) for spec in specs
             ]
-            attacker_outputs = _generate(
-                llm,
-                tokenizer,
-                attacker_prompts,
-                [int(spec["candidate_seed"]) for spec in specs],
-                lora_request=attacker_request,
-                batch_size=generation_batch_size,
-                max_new_tokens=max_new_tokens,
-                prompt_max_tokens=TRAIN_PROMPT_MAX_TOKENS,
-            )
-            parsed_attacks = [
-                parse_prefilled_cot_completion(item["text"])
-                for item in attacker_outputs
-            ]
+            # The attacker moves first against an empty history, and every
+            # request carries an explicit seed, so its rewrite is a
+            # deterministic function of (adapter, seed prompt, template,
+            # decoding, seed) and is identical for every defender this attacker
+            # is paired with. Reuse it rather than regenerating per cell.
+            cached_attacks: list[tuple[str, dict] | None] = [None] * len(specs)
+            if attack_cache is not None:
+                for position, spec in enumerate(specs):
+                    cached_attacks[position] = attack_cache.get(
+                        spec["source_index"],
+                        spec["prompt_type"],
+                        int(spec["candidate_seed"]),
+                        spec["seed_prompt"],
+                    )
+            todo = [i for i, hit in enumerate(cached_attacks) if hit is None]
+            attacker_outputs = [None] * len(specs)
+            if todo:
+                fresh = _generate(
+                    llm,
+                    tokenizer,
+                    [attacker_prompts[i] for i in todo],
+                    [int(specs[i]["candidate_seed"]) for i in todo],
+                    lora_request=attacker_request,
+                    batch_size=generation_batch_size,
+                    max_new_tokens=max_new_tokens,
+                    prompt_max_tokens=TRAIN_PROMPT_MAX_TOKENS,
+                )
+                for position, item in zip(todo, fresh):
+                    attacker_outputs[position] = item
+            parsed_attacks = []
+            for position, spec in enumerate(specs):
+                hit = cached_attacks[position]
+                if hit is not None:
+                    parsed_attacks.append(hit[0])
+                    attacker_outputs[position] = hit[1]
+                    continue
+                parsed = parse_prefilled_cot_completion(
+                    attacker_outputs[position]["text"]
+                )
+                parsed_attacks.append(parsed)
+                if attack_cache is not None:
+                    attack_cache.put(
+                        spec["source_index"],
+                        spec["prompt_type"],
+                        int(spec["candidate_seed"]),
+                        spec["seed_prompt"],
+                        parsed,
+                        attacker_outputs[position],
+                    )
+            if attack_cache is not None and todo:
+                print(
+                    f"attack cache: {len(specs) - len(todo)} hit / {len(todo)} generated "
+                    f"({attack_cache.stats()['hit_rate']:.1%} lifetime hit rate)",
+                    flush=True,
+                )
 
             status_path.write_text(
                 json.dumps(

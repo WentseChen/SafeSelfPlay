@@ -337,7 +337,7 @@ class ZeroSumProtocolTest(unittest.TestCase):
             trainer,
         )
         self.assertIn(
-            '"checkpoint_retention": "final_hf_only"',
+            '"checkpoint_retention": "all_hf_checkpoints_for_selection"',
             coordinator,
         )
         self.assertIn("keep_only_final_hf_checkpoint=True", coordinator)

@@ -1129,6 +1129,7 @@ def evaluate_zero_sum_psro_cell(
     seed_base: int = 8888,
     max_candidate_multiplier: int = 4,
     candidate_wave_pairs: int = 64,
+    adaptive_stratum_sampling: bool = False,
     generation_batch_size: int = 64,
     judge_batch_size: int = 64,
     max_new_tokens: int = 2048,
@@ -1163,6 +1164,7 @@ def evaluate_zero_sum_psro_cell(
         familywise_alpha=0.05,
         max_candidate_multiplier=max_candidate_multiplier,
         candidate_wave_pairs=candidate_wave_pairs,
+        adaptive_stratum_sampling=adaptive_stratum_sampling,
         generation_batch_size=generation_batch_size,
         judge_batch_size=judge_batch_size,
         max_new_tokens=max_new_tokens,
@@ -1394,6 +1396,38 @@ def train_cold_psro_oracle(
     return identity
 
 
+def _cell_episode_budget(
+    root: Path, attacker: str, defender: str, default: int
+) -> int:
+    """Per-cell episode budget written by the racing scheduler.
+
+    ``build_interleaved_episode_specs`` guarantees that the episode list for N is
+    the exact prefix of the list for any M > N, so a cell measured at a reduced
+    budget is a prefix of the full-budget cell rather than a different estimand.
+    That is what makes a per-cell budget sound: a pruned cell is the same
+    sampling sequence stopped early. Absent a plan file every cell uses the
+    contract value, so this is inert for runs that do not opt in.
+    """
+
+    plan_path = Path(root) / "cell_episode_plan.json"
+    if not plan_path.is_file():
+        return default
+    try:
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return default
+    budget = plan.get("cells", {}).get(f"{attacker}__{defender}")
+    if budget is None:
+        budget = plan.get("default", default)
+    budget = int(budget)
+    if budget < 256 or budget % 2:
+        raise ValueError(
+            f"cell_episode_plan budget for {attacker}__{defender} must be even "
+            f"and at least 256, got {budget}"
+        )
+    return budget
+
+
 def _advance_kwargs(contract: dict[str, Any], run_suffix: str) -> dict[str, Any]:
     return {
         "run_suffix": run_suffix,
@@ -1428,6 +1462,13 @@ def _advance_kwargs(contract: dict[str, Any], run_suffix: str) -> dict[str, Any]
         ],
         "judge_batch_size": contract["matrix_generation"]["judge_batch_size"],
         "max_new_tokens": contract["matrix_generation"]["max_new_tokens"],
+        "training_attacker_objective": contract.get(
+            "training_attacker_objective", ""
+        ).replace("actual-label-v4", ""),
+        "matrix_adaptive_stratum_sampling": contract.get(
+            "matrix_stratum_sampling", ""
+        )
+        == "retention-aware per-stratum waves",
     }
 
 
@@ -1486,6 +1527,8 @@ def advance_cold_psro(
     generation_batch_size: int = 64,
     judge_batch_size: int = 64,
     max_new_tokens: int = 2048,
+    training_attacker_objective: str = "",
+    matrix_adaptive_stratum_sampling: bool = False,
 ) -> dict[str, Any]:
     """Advance one durable cell/oracle/evaluation action, then detach the next."""
 
@@ -1546,14 +1589,29 @@ def advance_cold_psro(
         "matrix_prompt_mix": {"generated_harmful": 0.5, "generated_benign": 0.5},
         "matrix_reward": ZERO_SUM_REWARD_VERSION,
         "matrix_drift_policy": "drop benign-to-harmful and replace",
-        "training_reward": "existing general_sum pipeline unchanged",
+        "training_reward": (
+            "existing general_sum pipeline unchanged"
+            if not training_attacker_objective
+            else (
+                "attacker scored against its assigned prompt_type; "
+                "label drift floored below every faithful outcome"
+            )
+        ),
+        "training_attacker_objective": (
+            training_attacker_objective or "actual-label-v4"
+        ),
         "training_label_drift_policy": TRAINING_LABEL_DRIFT_POLICY,
+        "matrix_stratum_sampling": (
+            "retention-aware per-stratum waves"
+            if matrix_adaptive_stratum_sampling
+            else "1:1 harmful/benign lockstep"
+        ),
         "opponent_rule": (
             "sample one strategy per episode from the frozen zero-sum Nash "
             "mixture; base is eligible and no exploration floor is added"
         ),
         "steps_per_role": steps_per_role,
-        "checkpoint_retention": "final_hf_only",
+        "checkpoint_retention": "all_hf_checkpoints_for_selection",
         "lora_rank": lora_rank,
         "lora_alpha": lora_alpha,
         "attacker_learning_rate": attacker_learning_rate,
@@ -1673,10 +1731,11 @@ def advance_cold_psro(
             defender_adapter=defender_record.get("path") or "base",
             attacker_sha256=attacker_record["adapter_sha256"],
             defender_sha256=defender_record["adapter_sha256"],
-            episodes=matrix_episodes,
+            episodes=_cell_episode_budget(root, attacker, defender, matrix_episodes),
             seed_base=seed_base,
             max_candidate_multiplier=max_candidate_multiplier,
             candidate_wave_pairs=candidate_wave_pairs,
+            adaptive_stratum_sampling=matrix_adaptive_stratum_sampling,
             generation_batch_size=generation_batch_size,
             judge_batch_size=judge_batch_size,
             max_new_tokens=max_new_tokens,

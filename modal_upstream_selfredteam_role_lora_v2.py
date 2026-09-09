@@ -346,7 +346,9 @@ def _patch_asymmetric_label_drift_training() -> None:
         "from openrlhf.utils.remote_rm_utils import remote_rm_fn\n",
         "from openrlhf.utils.remote_rm_utils import remote_rm_fn\n"
         "from roll.utils.role_lora_training_reward import (\n"
+        "    ATTACKER_OBJECTIVE_INTENDED,\n"
         "    cap_label_drift_attacker_reward,\n"
+        "    compute_attacker_reward_intended,\n"
         "    label_drift_training_action,\n"
         ")\n",
         "role label-drift policy import",
@@ -390,6 +392,24 @@ def _patch_asymmetric_label_drift_training() -> None:
                 turn_states['game_outcomes'] = outcome
 """,
         """                if (
+                    turn_states["game_role"] == "attacker"
+                    and self.custom_configs.get("attacker_objective")
+                    == ATTACKER_OBJECTIVE_INTENDED
+                ):
+                    # Score the attacker against the prompt_type it was
+                    # assigned instead of the label WildGuard observed, so a
+                    # relabelled prompt cannot select a better reward branch.
+                    scored = compute_attacker_reward_intended(
+                        prompt_type=turn_states["prompt_type"],
+                        labels=labels,
+                        cot_format_violation=turn_states.get(
+                            "cot_format_violation", None
+                        ),
+                    )
+                    turn_states['reward_upstream_objective'] = reward
+                    turn_states['attacker_label_drift'] = scored["label_drift"]
+                    reward = scored["reward"]
+                elif (
                     label_drift_action == "cap_zero"
                     and turn_states["game_role"] == "attacker"
                 ):
@@ -413,6 +433,7 @@ def _patch_asymmetric_label_drift_training() -> None:
         """            'actual_prompt_harmfulness', 'actual_prompt_stratum',
             'prompt_origin', 'label_drift_action',
             'reward_before_label_drift_cap',
+            'reward_upstream_objective', 'attacker_label_drift',
 """,
         "label-drift diagnostics in replay metadata",
     )
