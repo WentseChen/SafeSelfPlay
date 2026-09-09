@@ -443,5 +443,5 @@ def solve_zero_sum_meta_game(
         "defender_regret": defender_regret,
         "exploitability": exploitability,
         "max_exploitability": max_exploitability,
-        "solver": "hedge-50000-fail-closed",
+        "solver": "exact-lp-maxent-fail-closed",
     }

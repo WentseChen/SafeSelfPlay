@@ -25,6 +25,22 @@ SFT_DIR=${SSP_SFT_DIR:-$SSP_ROOT/sft_data}
 PSRO=${SSP_OUT:-$SSP_ROOT/psro}
 PY=${SSP_PYTHON:-python}
 GPUS=${GPUS:-4}
+# DeepSpeed JIT-builds FusedAdam on first use and that needs `ninja`, which
+# lives in the interpreter's own bin rather than on the login PATH; without it
+# the actor dies with "Ninja is required to load C++ extensions". The cold-PSRO
+# driver already prepends this directory, so a phase launched through it worked
+# while the same phase launched from submit_ladder.sh did not.
+case ":$PATH:" in
+  *":$(dirname "$PY"):"*) ;;
+  *) PATH="$(dirname "$PY"):$PATH"; export PATH ;;
+esac
+# `ray` must come from the same interpreter as $PY; a stale ~/.local/bin/ray
+# earlier on PATH shadows it and dies with "required file not found".
+RAY_BIN=${RAY_BIN:-}
+if [ -z "$RAY_BIN" ]; then
+  _candidate=$(dirname "$PY")/ray
+  if [ -x "$_candidate" ]; then RAY_BIN=$_candidate; else RAY_BIN=ray; fi
+fi
 
 ROLE=${ROLE:?attacker|defender}
 GEN=${GEN:-1}
@@ -32,7 +48,35 @@ STEPS=${STEPS:-100}
 LORA_RANK=${LORA_RANK:-64}
 LORA_ALPHA=${LORA_ALPHA:-64}
 OPPONENT=${OPPONENT:-}            # frozen opponent adapter; empty means base only
+# Cold PSRO best-responds to a frozen Nash mixture rather than one adapter, so
+# the pool is passed through verbatim; it is mutually exclusive with OPPONENT.
+OPPONENT_POOL_JSON=${OPPONENT_POOL_JSON:-}
 START_ADAPTER=${START_ADAPTER:-}  # warm-start this role instead of cold-starting
+
+# Cold-PSRO parity switches. role_lora_v2.py always sets these two custom
+# configs; the ladder predates them, so they stay opt-in and the PSRO driver
+# turns them on.
+EXACT_LABEL_BALANCE=${EXACT_LABEL_BALANCE:-0}
+LABEL_DRIFT_POLICY=${LABEL_DRIFT_POLICY:-}
+# Attacker objective: empty keeps the upstream observed-label branching;
+# "intended-prompt-type-v5" scores the attacker against its assigned
+# prompt_type and floors a relabelled prompt at ATTACKER_LABEL_DRIFT_PENALTY.
+ATTACKER_OBJECTIVE=${ATTACKER_OBJECTIVE:-}
+# Defender responses carry a CoT block, so a long compliance can reach the
+# generation cap and be truncated mid-tag, which scores as a format
+# violation.  Raise GENERATE_MAX_LEN to give it headroom; the default is
+# left at the upstream 2048 so existing runs stay comparable.
+PROMPT_MAX_LEN=${PROMPT_MAX_LEN:-2048}
+GENERATE_MAX_LEN=${GENERATE_MAX_LEN:-2048}
+
+# --- weights & biases ---------------------------------------------------------
+# Same org/project/group/run-id scheme as modal_upstream_selfredteam_role_lora_v2
+# so a requeued phase reattaches to its existing run instead of forking a new
+# one. The key is read from WANDB_API_KEY only and is never written to disk.
+WANDB_ENTITY=${WANDB_ENTITY:-2373025856w-the-university-of-hong-kong}
+WANDB_PROJECT=${WANDB_PROJECT:-self-play}
+WANDB_GROUP=${WANDB_GROUP:-upstream-selfredteam-role-lora-v2}
+WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 
 # --- memory -------------------------------------------------------------------
 # vLLM's gpu_memory_utilization is a PRIVATE per-engine fraction of the whole
@@ -63,9 +107,19 @@ MICRO_TRAIN=${MICRO_TRAIN:-8}          # train_batch_size / GPUS
 TRAIN_BATCH=${TRAIN_BATCH:-32}
 ROLLOUT_BATCH=${ROLLOUT_BATCH:-128}
 
+# Colocated mode keeps the trainable engines resident during the optimizer
+# step. That is the fastest option when the frozen opponent is a single
+# adapter, but a PSRO mixture engine plus the judge on GPU 0 leaves the ZeRO-3
+# actor short and it OOMs mid-step. VLLM_SLEEP releases the trainable engines
+# for the duration of the step, which is what the Modal runs did.
+VLLM_SLEEP=${VLLM_SLEEP:-0}
+DS_SLEEP=${DS_SLEEP:-0}
+
 ENGINE_PERF=()
 [ "$EAGER" = 1 ] && ENGINE_PERF+=(--enforce_eager)
 [ "$PREFIX" = 1 ] && ENGINE_PERF+=(--enable_prefix_caching)
+[ "$VLLM_SLEEP" = 1 ] && ENGINE_PERF+=(--vllm_enable_sleep)
+[ "$DS_SLEEP" = 1 ] && ENGINE_PERF+=(--deepspeed_enable_sleep)
 
 # --- role-specific settings, per role_lora_v2.py ------------------------------
 case $ROLE in
@@ -102,7 +156,7 @@ mkdir -p "$TMPDIR"
 # allocator conflicts with vLLM's memory pool.
 export NCCL_CUMEM_ENABLE=${NCCL_CUMEM_ENABLE:-0}
 export VLLM_ENABLE_V1_MULTIPROCESSING=${VLLM_ENABLE_V1_MULTIPROCESSING:-0}
-export WANDB_MODE=${WANDB_MODE:-disabled}
+[ -n "${WANDB_API_KEY:-}" ] || export WANDB_MODE=${WANDB_MODE:-disabled}
 # The patched vllm_worker_wrap imports roll.third_party.vllm.TensorLoRARequest;
 # Modal mounts the repo for this, so add both trees to the path here.
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -116,10 +170,11 @@ RAY_PORT=${RAY_PORT:-6100}
 RM_URL=http://$IP:$JUDGE_PORT/classify
 cd "$WORK"
 
-CUSTOM=$($PY - "$ROLE" "$SFT_STOP" <<'PY'
+CUSTOM=$($PY - "$ROLE" "$SFT_STOP" "$EXACT_LABEL_BALANCE" "$LABEL_DRIFT_POLICY" \
+        "${ACTOR_LR_SCHEDULER:-constant_with_warmup}" "$ATTACKER_OBJECTIVE" <<'PY'
 import json, sys
-role, sft_stop = sys.argv[1], int(sys.argv[2])
-print(json.dumps({
+role, sft_stop, balance, drift, scheduler, attacker_objective = sys.argv[1:7]
+config = {
     "max_turns": 2, "reward_type": "general_sum", "remove_ties": True,
     "redistribute_after_ties": True,
     "no_defender_turn": role == "attacker",
@@ -127,9 +182,16 @@ print(json.dumps({
     "optimizer_train_role": role,
     "fixed_defender_from_opponent_vllm": role == "attacker",
     "fixed_attacker_from_opponent_vllm": role == "defender",
-    "actor_lr_scheduler": "constant_with_warmup",
-    "postfill_cot_stop_after_step": sft_stop,
-}))
+    "actor_lr_scheduler": scheduler,
+    "postfill_cot_stop_after_step": int(sft_stop),
+}
+if balance == "1":
+    config["exact_prompt_label_balance"] = True
+if drift:
+    config["label_drift_training_policy"] = drift
+if attacker_objective:
+    config["attacker_objective"] = attacker_objective
+print(json.dumps(config))
 PY
 )
 
@@ -137,9 +199,32 @@ PY
 # the first phase that faces a trained opponent.
 OPP_ARGS=(--fixed_opponent_pretrain "$BASE"
           --fixed_opponent_vllm_gpu_memory_utilization "$OPP_UTIL")
+if [ -n "$OPPONENT" ] && [ -n "$OPPONENT_POOL_JSON" ]; then
+  echo "OPPONENT and OPPONENT_POOL_JSON are mutually exclusive" >&2; exit 1
+fi
 [ -n "$OPPONENT" ] && OPP_ARGS+=(--fixed_opponent_lora_path "$OPPONENT"
                                 --fixed_opponent_lora_rank "$LORA_RANK")
+[ -n "$OPPONENT_POOL_JSON" ] && OPP_ARGS+=(--fixed_opponent_pool_json "$OPPONENT_POOL_JSON"
+                                           --fixed_opponent_lora_rank "$LORA_RANK")
 START_ARGS=(); [ -n "$START_ADAPTER" ] && START_ARGS=(--role_start_adapter "$START_ADAPTER")
+
+# W&B run identity must be exported before `ray start`: Ray workers inherit the
+# raylet environment, and ppo_actor.py reads WANDB_RUN_ID/WANDB_RESUME there.
+WANDB_ARGS=()
+if [ -n "${WANDB_API_KEY:-}" ]; then
+  WANDB_RUN_NAME=${WANDB_RUN_NAME:-$(basename "$PSRO")__$TAG}
+  WANDB_RUN_ID=$(printf '%s' "$WANDB_RUN_NAME" | sha1sum | cut -c1-8)
+  export WANDB_RUN_ID
+  export WANDB_RESUME=${WANDB_RESUME:-allow}
+  export WANDB_MODE=${WANDB_MODE:-online}
+  export WANDB_DIR=${WANDB_DIR:-$OUT}
+  WANDB_ARGS=(--use_wandb "$WANDB_API_KEY"
+              --wandb_org "$WANDB_ENTITY" --wandb_project "$WANDB_PROJECT"
+              --wandb_group "$WANDB_GROUP" --wandb_run_name "$WANDB_RUN_NAME"
+              --wandb_max_log 10000 --wandb_table_log_interval 1
+              --wandb_table_csv_path "$OUT/run_tables")
+  echo "$TAG wandb https://wandb.ai/$WANDB_ENTITY/$WANDB_PROJECT/runs/$WANDB_RUN_ID"
+fi
 
 TRAIN_CMD=("$PY" -m openrlhf.cli.train_ppo_ray
   --actor_num_nodes 1 --actor_num_gpus_per_node "$GPUS"
@@ -148,7 +233,7 @@ TRAIN_CMD=("$PY" -m openrlhf.cli.train_ppo_ray
   --vllm_num_engines "$ENGINES" --vllm_tensor_parallel_size "$TP"
   --colocate_all_models --vllm_gpu_memory_utilization "$UTIL"
   --pretrain "$BASE" --save_path "$OUT" --ckpt_path "$OUT/ckpt"
-  --save_steps "${SAVE_STEPS:-10}" --save_hf_ckpt --disable_ds_ckpt --max_ckpt_num 1
+  --save_steps "${SAVE_STEPS:-10}" --save_hf_ckpt --disable_ds_ckpt --max_ckpt_num "${MAX_CKPT_NUM:-1}"
   --lora_rank "$LORA_RANK" --lora_alpha "$LORA_ALPHA"
   --target_modules "${LORA_TARGET_MODULES[@]}"
   "${OPP_ARGS[@]}" "${START_ARGS[@]}"
@@ -158,7 +243,7 @@ TRAIN_CMD=("$PY" -m openrlhf.cli.train_ppo_ray
   --prompt_data_probs "0.5, 0.5"
   --eval_data "red_team/data/1k_vanilla_harmful_prompts_holdout.jsonl"
   --max_samples $((STEPS * ROLLOUT_BATCH)) --max_epochs 1
-  --prompt_max_len 2048 --generate_max_len 2048
+  --prompt_max_len "${PROMPT_MAX_LEN:-2048}" --generate_max_len "${GENERATE_MAX_LEN:-2048}"
   --zero_stage 3 --num_episodes 1 --bf16 --seed "${TRAINING_SEED:-8888}" --top_p 1.0
   --gradient_checkpointing --gradient_checkpointing_use_reentrant
   --monitor_reference_kl --temperature 1.0 --lr_warmup_ratio "${LR_WARMUP_RATIO:-0.03}"
@@ -169,11 +254,19 @@ TRAIN_CMD=("$PY" -m openrlhf.cli.train_ppo_ray
   --advantage_estimator reinforce
   --custom_configs "$CUSTOM"
   --actor_loss_coef 1.0 --postfill_cot_loss_coef 1.0
-  --eval_steps 100000 --eval_start_steps 100000 --diversity_score_steps 100000
-  --vllm_sync_backend nccl "${ENGINE_PERF[@]}" --flash_attn)
+  --eval_steps "${EVAL_STEPS:-100000}" --eval_start_steps "${EVAL_START_STEPS:-100000}"
+  --diversity_score_steps "${DIVERSITY_STEPS:-100000}"
+  --vllm_sync_backend nccl "${ENGINE_PERF[@]}" --flash_attn
+  "${WANDB_ARGS[@]}")
 
 if [ "${DRY_RUN:-0}" = 1 ]; then
-  printf '%q ' "${TRAIN_CMD[@]}"; echo
+  for arg in "${TRAIN_CMD[@]}"; do
+    if [ -n "${WANDB_API_KEY:-}" ] && [ "$arg" = "$WANDB_API_KEY" ]; then
+      printf '%q ' '<redacted>'
+    else
+      printf '%q ' "$arg"
+    fi
+  done; echo
   exit 0
 fi
 
@@ -201,13 +294,42 @@ echo "$TAG judge up after ~$((i * 10))s"
 # --- ray ----------------------------------------------------------------------
 # One head per node: two concurrent phases on the same node corrupt each other's
 # placement-group scheduling and both hang after "Connected to Ray cluster".
-export RAY_TMPDIR=/tmp/ssp-ray-$RAY_PORT; rm -rf "$RAY_TMPDIR"
-ray start --head --disable-usage-stats --temp-dir="$RAY_TMPDIR" \
+export RAY_TMPDIR=/tmp/ssp-ray-$RAY_PORT
+# `ray stop` kills every Ray process this user owns on the node, so it cannot
+# be used while a second phase runs on the other half of the node. Every Ray
+# process carries the temp dir in its command line, so match on that instead.
+ray_shutdown() {
+  if [ "${RAY_STOP_SCOPE:-temp_dir}" = node ]; then
+    "$RAY_BIN" stop --force >/dev/null 2>&1 || true
+    return
+  fi
+  for signal in TERM KILL; do
+    for pid in $(pgrep -u "$(id -u)" -f "$RAY_TMPDIR" 2>/dev/null || true); do
+      [ "$pid" = "$$" ] && continue
+      kill "-$signal" "$pid" 2>/dev/null || true
+    done
+    if [ "$signal" = TERM ]; then sleep 5; fi
+  done
+}
+# Pin the trainer's engines to the vLLM V0 runner. The trainable group always
+# falls back to V0 (sleep and LoRA weight sync are V1-unsupported) and so does
+# the frozen-opponent group whenever it carries an adapter -- which is every
+# phase except the very first attacker, whose opponent is the bare base model.
+# That one phase came up half V0 / half V1, and the V1 engines profile memory
+# differently and died with "No available memory for the cache blocks" inside
+# the same 0.13 judge + 0.28 trainable + 0.26 opponent budget every other phase
+# fits in. This has to be exported before `ray start` for the same reason
+# WANDB_RUN_ID does: the actors inherit the raylet's environment, not the
+# environment of the command that launches the job. The judge is already up on
+# its own V1 engine by this point and is unaffected.
+export VLLM_USE_V1=${VLLM_USE_V1:-0}
+ray_shutdown; rm -rf "$RAY_TMPDIR"
+"$RAY_BIN" start --head --disable-usage-stats --temp-dir="$RAY_TMPDIR" \
   --port="$RAY_PORT" --include-dashboard=false \
   --ray-client-server-port=$((RAY_PORT + 2000)) --num-gpus="$GPUS" >/dev/null
 export RAY_ADDRESS=$IP:$RAY_PORT
-trap 'kill $JUDGE_PID 2>/dev/null || true; ray stop --force >/dev/null 2>&1 || true' EXIT
+trap 'kill $JUDGE_PID 2>/dev/null || true; ray_shutdown' EXIT
 
-echo "$TAG start $(date +%H:%M:%S) role=$ROLE lr=$LR steps=$STEPS opponent=${OPPONENT:-none}" >> "$PSRO/state.txt"
+echo "$TAG start $(date +%H:%M:%S) role=$ROLE lr=$LR steps=$STEPS opponent=${OPPONENT:-${OPPONENT_POOL_JSON:-none}}" >> "$PSRO/state.txt"
 "${TRAIN_CMD[@]}"
 echo "$TAG done rc=$? $(date +%H:%M:%S)" >> "$PSRO/state.txt"

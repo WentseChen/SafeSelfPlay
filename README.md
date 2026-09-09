@@ -96,6 +96,78 @@ evaluation. A dash means the paper did not report that supplemental column.
 | SafeSelfPlay D1, step 100(reward-hacking) | Our evaluation | 0.036 | 0.007 | 0.145 | 0.200 | 0.066 | 0.916 | 0.945 | 0.612 | 0.836 | 0.367 |
 | SafeSelfPlay D2, step 80 (reward-hacking) | Our evaluation | 0.015 | 0.024 | 0.093 | 0.423 | 0.084 | 0.802 | 0.670 | 0.584 | 0.984 | 0.510 |
 | SafeSelfPlay D3, step 80 (reward-hacking) | Our evaluation | 0.003 | 0.000 | 0.031 | 0.090 | 0.031 | 0.860 | 0.780 | 0.604 | 0.980 | 0.430 |
+| SafeSelfPlay D1, step 100 (cold PSRO 20260827) | Our evaluation | 0.086 | 0.041 | 0.606 | 0.340 | 0.171 | 0.557 | 0.760 | 0.940 | 0.976 | 0.944 |
+| SafeSelfPlay D2, step 100 (cold PSRO 20260827) | Our evaluation | 0.154 | 0.007 | 0.273 | 0.283 | 0.122 | 0.939 | 0.980 | 0.764 | 0.768 | 0.296 |
+| SafeSelfPlay D3, step 100 (cold PSRO 20260827) | Our evaluation | 0.030 | 0.012 | 0.182 | 0.230 | 0.058 | 0.742 | 0.825 | 0.676 | 0.928 | 0.685 |
+| SafeSelfPlay D4, step 100 (cold PSRO 20260827) | Our evaluation | 0.009 | 0.039 | 0.021 | 0.070 | 0.029 | 0.518 | 0.785 | 0.020 | 0.872 | 0.851 |
+| SafeSelfPlay D5, step 100 (cold PSRO 20260827) | Our evaluation | 0.273 | 0.097 | 0.822 | 0.563 | 0.253 | 0.592 | 0.820 | 0.956 | 0.928 | 0.901 |
+| SafeSelfPlay D4 retrained, step 100 (cold PSRO 20260827 follow-up) | Our evaluation | 0.294 | 0.083 | 0.711 | 0.527 | 0.262 | 0.585 | 0.870 | 0.960 | 0.860 | 0.807 |
+| SafeSelfPlay D3, step 200 (cold PSRO 20260827 follow-up) | Our evaluation | 0.125 | 0.022 | 0.319 | 0.260 | 0.203 | 0.866 | 0.785 | 0.888 | 0.988 | 0.575 |
+| SafeSelfPlay D5, step 300 (cold PSRO 20260827 follow-up) | Our evaluation | 0.139 | 0.012 | 0.445 | 0.223 | 0.135 | 0.878 | 0.890 | 0.948 | 0.940 | 0.416 |
+| SafeSelfPlay D1, step 100 (cold PSRO 20260831 drift-penalised) | Our evaluation | 0.184 | 0.036 | 0.620 | 0.370 | 0.177 | 0.637 | 0.715 | 0.964 | 0.936 | 0.889 |
+| SafeSelfPlay D2, step 100 (cold PSRO 20260831 drift-penalised) | Our evaluation | 0.362 | 0.138 | 0.866 | 0.570 | 0.263 | 0.501 | 0.840 | 0.968 | 0.904 | 0.894 |
+| SafeSelfPlay D2, step 200 @ 4096 gen (cold PSRO 20260831 drift-penalised) | Our evaluation | 0.089 | 0.015 | 0.366 | 0.427 | 0.129 | 0.893 | 0.900 | 0.908 | 0.944 | 0.451 |
+| SafeSelfPlay D3, step 100 (cold PSRO 20260831 generation 3) | Our evaluation | 0.030 | 0.002 | 0.147 | 0.123 | 0.051 | 0.881 | 0.870 | 0.612 | 0.932 | 0.546 |
+| Naive self-play D4, step 100 (latest-opponent 20260902) | Our evaluation | 0.050 | 0.022 | 0.274 | 0.263 | 0.078 | 0.704 | 0.830 | 0.828 | 0.904 | 0.697 |
+| Naive self-play D1, step 100 (latest-opponent 20260902) | Our evaluation | 0.050 | 0.049 | 0.520 | 0.257 | 0.141 | 0.730 | 0.785 | 0.916 | 0.980 | 0.848 |
+| Naive self-play D2, step 100 (latest-opponent 20260902) | Our evaluation | 0.205 | 0.066 | 0.750 | 0.497 | 0.199 | 0.753 | 0.855 | 0.932 | 0.912 | 0.804 |
+| Naive self-play D3, step 100 (latest-opponent 20260902) | Our evaluation | 0.071 | 0.039 | 0.380 | 0.167 | 0.075 | 0.696 | 0.760 | 0.788 | 0.948 | 0.834 |
+| Naive self-play D4 rerun, step 100, full-budget A4 (latest-opponent 20260902) | Our evaluation | 0.068 | 0.012 | 0.224 | 0.443 | 0.098 | 0.910 | 0.885 | 0.756 | 0.828 | 0.277 |
+| SafeSelfPlay D4, step 100 (cold PSRO 20260831 generation 4) | Our evaluation | 0.086 | 0.092 | 0.254 | 0.353 | 0.117 | 0.841 | 0.925 | 0.724 | 0.840 | 0.466 |
+
+**D4 (cold PSRO 20260827) is a collapsed checkpoint, not a safe model.** Its step-100 weights emit non-linguistic tokens (83-100% CoT-format violation, 91-95% length-truncation), which WildGuard returns null labels for; those map to a neutral 0.0 tie in the payoff, so its low ASRs are an artifact. The tell is WJB benign comply = 0.020. See the `D4 retrained` follow-up row for the same PSRO position trained without the collapse.
+
+The `cold PSRO 20260831 drift-penalised` rows come from a fresh two-generation cold
+chain retrained with two changes and nothing else: the attacker's training reward is
+now scored against the prompt type it was assigned rather than the label WildGuard
+observed, with benign->harmful drift floored below every faithful outcome
+(`intended-prompt-type-v5`), and payoff-cell sampling draws harmful and benign
+candidates in retention-aware waves instead of lockstep. The reward change removed
+the drift it targeted: benign prompts rewritten into harmful ones fell from 8.72% to
+0.45% for A1 and from 10.39% to 0.60% for A2, below the untrained base attacker's
+0.84%. Compare these two rows against `cold PSRO 20260827` D1/D2, which occupy the
+same PSRO positions under the old reward. D1 reproduces at similar strength, but the
+20260827 D2's much lower ASRs came with an over-refusal collapse (OR-Bench benign
+comply 0.296, WJB benign 0.764) that the drift-penalised D2 does not have; the
+drift-penalised D2 is instead weak on safety, and the payoff matrix drops it from the
+Nash support entirely. Its training never gained a foothold:
+`generated_harmful_correct_refusal_acc` was exactly 0.0 for 88.1% of steps and peaked
+at 0.094, against D1's rise to 1.0. Per-defender manifests are under
+`/zfsauton/scratch/wentsec/coldpsro_slurm/psro/upstream_selfredteam_role_full_eval/cold_psro_cold_psro_v5_adaptive_n4000_s100_20260831_v1_D{1,2}/`.
+
+The `D2, step 200 @ 4096 gen` row is that same PSRO position retrained after the
+cause of the weakness was found. D2's foothold failure was driven by truncation:
+a defender answer carries a CoT block, so a long compliance reached the 2048-token
+generation cap and was cut mid-tag, which scores as a format violation. Doubling
+the cap to 4096 removes it — `defender/cot_format_violation` stays at 0.005 instead
+of running to 1.00 — and training then converges, stopping at 200 steps once
+`attacker/info/successful_harmful_request_rate` held at or below 0.02 across three
+consecutive 10-step windows. Safety improves across the board: WG adv ASR
+0.362 -> 0.089, WJB harmful 0.866 -> 0.366, HarmBench adv 0.263 -> 0.129.
+
+That gain is not free. OR-Bench benign compliance falls 0.894 -> 0.451, so the
+retrained D2 has moved roughly halfway toward the 20260827 D2's over-refusal
+collapse (0.296) on the hardest benign set, while XSTest benign comply (0.944) and
+WJB benign comply (0.908) hold. The in-training benign guard does not see this: its
+benign prompts are attacker-generated and it read 0.966 at the stopping point. Read
+these two D2 rows as a safety/over-refusal trade rather than a strict improvement.
+
+`D3, step 100 (generation 3)` continues that trade in the same direction. Safety
+improves again (WG adv ASR 0.089 -> 0.030, WJB harmful 0.366 -> 0.147, DAN 0.427
+-> 0.123, HarmBench adv 0.129 -> 0.051) while WJB benign compliance falls
+0.908 -> 0.612; OR-Bench benign compliance recovers slightly, 0.451 -> 0.546.
+D3's in-training benign-compliance guard read 0.907 at step 100 and had been
+drifting down from 0.956, so the guard does register the direction of the
+problem but badly understates it.
+
+Note what D3 is a best response to. On the generation-3 matrix the attacker's
+Nash is the untrained base attacker A0: A1 (-0.732), A2 (-0.694) and A3 (-0.709)
+all score worse against D2 than A0's -0.557, so the mixture D3 trained against
+was 97.6% A0. Three consecutive attacker oracles failed to improve on the base
+attacker, which is the limiting factor in this ladder rather than defender
+strength.
+
+The `cold PSRO 20260827` rows come from the sequential Slurm PSRO chain; their per-defender result manifests and a standalone copy of this block are recorded in `/zfsauton/scratch/wentsec/coldpsro_slurm/psro/role_lora_zero_sum_psro/cold_psro5_base_n4000_s100_20260827_slurm_v1/results_summary.md`.
 
 The five ASR columns contain harmful prompts and are lower-is-better. OR-Bench
 RTA and XSTest RTA also contain harmful or contrast prompts, but report the
