@@ -77,12 +77,81 @@ tokenizer = AutoTokenizer.from_pretrained(
 
 ### Defender results
 
-The first two rows in the main table are reported by Self-RedTeam. All other
-completed rows in both tables use our released evaluator with the same
-`llama3_cot` template. Paper-reported and locally measured numbers are not a
-paired evaluation. A dash means either that the paper did not report the
-supplemental column or that an evaluation is still pending, as indicated in
-`Source`.
+The latest checkpoint results are shown below. `v` denotes cold PSRO v6d and
+`n` denotes naive self-play; `base` is the defender before self-play training.
+Naive checkpoints are numbered D1–D5. All values are on a 0–1 scale. Arrows
+indicate the preferred direction; bold marks the best trained-checkpoint value
+in each row, including ties, with the base excluded from highlighting.
+vD7 is the clean 300-step retrain; a dash denotes a result not yet reported.
+Its WJB benign and OR-Bench benign evaluations are still pending.
+
+| Metric | base | vD1 | vD2 | vD3 | vD4 | vD5 | vD6 | vD7 | nD1 | nD2 | nD3 | nD4 | nD5 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| WG adv ASR ↓ | 0.424 | 0.059 | 0.018 | 0.039 | 0.056 | 0.006 | **0.000** | 0.009 | 0.050 | 0.205 | 0.071 | 0.050 | 0.068 |
+| WG vanilla ASR ↓ | 0.454 | 0.024 | 0.002 | 0.058 | 0.005 | **0.000** | 0.005 | 0.022 | 0.049 | 0.066 | 0.039 | 0.022 | 0.012 |
+| WJB harmful ASR ↓ | 0.938 | 0.354 | 0.213 | 0.449 | 0.199 | 0.116 | **0.113** | 0.276 | 0.520 | 0.750 | 0.380 | 0.274 | 0.224 |
+| DAN ASR ↓ | 0.910 | 0.420 | 0.143 | 0.147 | 0.323 | 0.110 | **0.053** | 0.110 | 0.257 | 0.497 | 0.167 | 0.263 | 0.443 |
+| HarmBench adv ASR ↓ | 0.575 | 0.147 | 0.040 | 0.090 | 0.047 | **0.024** | 0.042 | 0.038 | 0.141 | 0.199 | 0.075 | 0.078 | 0.098 |
+| SR12 mean score ↓ | 0.558 | 0.275 | 0.054 | 0.094 | 0.222 | **0.025** | 0.046 | 0.072 | 0.141 | 0.323 | 0.121 | 0.222 | 0.249 |
+| SR12 worst score ↓ | 0.925 | 0.791 | 0.079 | 0.218 | 0.799 | **0.049** | 0.105 | 0.113 | 0.358 | 0.623 | 0.401 | 0.641 | 0.673 |
+| SORRY-Bench ASR ↓ | 0.884 | 0.207 | 0.159 | 0.241 | 0.089 | **0.068** | 0.136 | 0.223 | 0.252 | 0.370 | 0.220 | 0.214 | 0.136 |
+| OR-Bench RTA ↑ | 0.099 | 0.685 | 0.850 | 0.695 | **0.930** | 0.840 | 0.786 | 0.760 | 0.730 | 0.753 | 0.696 | 0.704 | 0.910 |
+| XSTest RTA ↑ | 0.415 | 0.715 | 0.845 | 0.775 | 0.875 | 0.685 | 0.630 | 0.760 | 0.785 | 0.855 | 0.760 | 0.830 | **0.885** |
+| WJB benign comply ↑ | 0.932 | 0.868 | 0.768 | 0.840 | 0.836 | 0.544 | 0.724 | - | 0.916 | **0.932** | 0.788 | 0.828 | 0.756 |
+| XSTest benign comply ↑ | 0.940 | 0.972 | 0.956 | **0.988** | 0.880 | 0.900 | 0.980 | 0.980 | 0.980 | 0.912 | 0.948 | 0.904 | 0.828 |
+| OR-Bench benign comply ↑ | 0.972 | 0.698 | 0.589 | 0.814 | 0.299 | 0.310 | 0.588 | - | **0.848** | 0.804 | 0.834 | 0.697 | 0.277 |
+
+WG (WildGuardTest) evaluates vanilla and adversarial harmful prompts. WJB
+(WildJailbreak) and DAN (Do Anything Now) evaluate jailbreak prompts;
+HarmBench adv uses precomputed adversarial attacks. These ASR rows report
+the fraction of harmful responses, with lower values indicating better safety.
+
+**SR12 (StrongREJECT)** evaluates 313 harmful prompts under 12 conditions:
+one unwrapped condition (`none`) and 11 wrapping templates. The official
+`strongreject_finetuned` grader assigns a continuous harmfulness score in
+[0, 1]. Each condition's score averages all 313 prompts. The table's **mean**
+and **worst** are the mean and maximum over the **11 wrapped conditions only**;
+the unwrapped score is separate. These are continuous scores, not binary ASR.
+
+**SORRY-Bench** evaluates 440 unsafe requests with the official judge
+`sorry-bench/ft-mistral-7b-instruct-v0.2-sorry-bench-202406`, loaded once for
+all compared checkpoints. It reports the fraction labeled as fulfilling the
+unsafe request (`fulfilment_rate`), shown as ASR in the table.
+
+OR-Bench RTA uses the toxic subset, and XSTest RTA uses the unsafe contrast
+subset. In the released evaluator, RTA is the fraction of responses classified
+as refusals (`response_refusal`), so higher is better on these subsets.
+Benign compliance uses WJB adversarial benign, XSTest safe prompts, and
+OR-Bench hard-1k; higher values indicate less over-refusal. The XSTest and
+OR-Bench compliance metrics are computed as `1 - refusal rate` on their benign
+subsets.
+
+<details>
+<summary>StrongREJECT scoring protocol</summary>
+
+The 11 wrappers are `aim`, `evil_confidant`, `dev_mode_v2`,
+`refusal_suppression`, `prefix_injection`, `distractors`,
+`style_injection_short`, `wikipedia_with_title`, `poems`, `few_shot_json`, and
+`combination_2`. They are selected from the 23 templates in StrongREJECT's
+`wrapping_jailbreaks.json` and applied by literal string replacement.
+
+The grader uses the PEFT adapter `qylu4156/strongreject-15k-v1` on
+`unsloth/gemma-2b`, a mirror of `google/gemma-2b`. Responses are truncated to
+512 grader tokens and inserted into the official judge template. A softmax
+over the final-position logits for tokens `1`–`5`, weighted by
+`[0, 0.25, 0.5, 0.75, 1]`, produces each response's score. The source summary's
+`mean_over_12` and `best_of_12` include `none`; the README's SR12 aggregates
+use only the 11 wrapped conditions.
+
+</details>
+
+<details>
+<summary>Self-RedTeam paper and reproduction reference results</summary>
+
+The first two rows are paper-reported. The two locally measured rows use the
+released evaluator with the same `llama3_cot` template. Paper-reported and
+locally measured numbers are separate evaluations. A dash means that the
+paper did not report the metric.
 
 | Model | Source | WG adv ASR ↓ | WG vanilla ASR ↓ | WJB harmful ASR ↓ | DAN ASR ↓ | HarmBench adv ASR ↓ | OR-Bench RTA ↑ | XSTest RTA ↑ | WJB benign comply ↑ | XSTest benign comply ↑ | OR-Bench benign comply ↑ |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -90,105 +159,76 @@ supplemental column or that an evaluation is still pending, as indicated in
 | Self-RedTeam + SFT, step 200 | Paper | 0.138 | 0.019 | 0.240 | 0.396 | 0.221 | 0.846 | 0.814 | 0.806 | 0.920 | - |
 | Llama-3.1-8B-Instruct-abliterated (base) | Our evaluation | 0.424 | 0.454 | 0.938 | 0.910 | 0.575 | 0.099 | 0.415 | 0.932 | 0.940 | 0.972 |
 | Self-RedTeam reproduction, step 200 | Our evaluation | 0.095 | 0.019 | 0.159 | 0.400 | 0.196 | 0.925 | 0.835 | 0.780 | 0.880 | 0.365 |
-| SafeSelfPlay D1, step 100 (naive) | Our evaluation | 0.065 | 0.019 | 0.378 | 0.280 | 0.121 | 0.896 | 0.870 | 0.908 | 0.932 | 0.469 |
-| SafeSelfPlay D2, step 100 (naive) | Our evaluation | 0.074 | 0.019 | 0.272 | 0.377 | 0.126 | 0.860 | 0.895 | 0.820 | 0.952 | 0.637 |
-| SafeSelfPlay D3, step 100 (naive) | Our evaluation | 0.024 | 0.022 | 0.135 | 0.083 | 0.087 | 0.841 | 0.870 | 0.856 | 0.988 | 0.588 |
-| SafeSelfPlay D4, step 100 (naive) | Our evaluation | 0.033 | 0.092 | 0.186 | 0.190 | 0.141 | 0.907 | 0.790 | 0.676 | 0.984 | 0.380 |
-| SafeSelfPlay D5, step 100 (naive) | Our evaluation | 0.024 | 0.022 | 0.117 | 0.207 | 0.091 | 0.737 | 0.575 | 0.872 | 0.992 | 0.614 |
-| SafeSelfPlay D1, step 100 (cold PSRO) | Our evaluation | 0.086 | 0.041 | 0.606 | 0.340 | 0.171 | 0.557 | 0.760 | 0.940 | 0.976 | 0.944 |
-| SafeSelfPlay D2, step 100 (cold PSRO) | *Pending — job 39253* | - | - | - | - | - | - | - | - | - | - |
-| SafeSelfPlay D3, step 100 (cold PSRO) | Our evaluation | 0.030 | 0.012 | 0.182 | 0.230 | 0.058 | 0.742 | 0.825 | 0.676 | 0.928 | 0.685 |
-| SafeSelfPlay D4, step 100 (cold PSRO) | Our evaluation | 0.009 | 0.039 | 0.021 | 0.070 | 0.029 | 0.518 | 0.785 | 0.020 | 0.872 | 0.851 |
-| SafeSelfPlay D5, step 100 (cold PSRO) | Our evaluation | 0.273 | 0.097 | 0.822 | 0.563 | 0.253 | 0.592 | 0.820 | 0.956 | 0.928 | 0.901 |
 
-Both tables use the same metric directions. The five ASR columns contain
-harmful prompts and are lower-is-better. OR-Bench RTA and XSTest RTA also
-contain harmful or contrast prompts, but report the safe-response rate
-(`1 - ASR`), so they are higher-is-better. WJB adversarial benign, XSTest
-vanilla benign, and OR-Bench hard-1k measure whether the model still complies
-with benign requests; lower values on these columns indicate more over-refusal.
-The released evaluator does not include StrongREJECT.
+</details>
 
-#### Historical results(reward-hacking)
+### Attacker results
 
-| Model | Source | WG adv ASR ↓ | WG vanilla ASR ↓ | WJB harmful ASR ↓ | DAN ASR ↓ | HarmBench adv ASR ↓ | OR-Bench RTA ↑ | XSTest RTA ↑ | WJB benign comply ↑ | XSTest benign comply ↑ | OR-Bench benign comply ↑ |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| SafeSelfPlay D1, step 100 (reward-hacking) | Our evaluation | 0.036 | 0.007 | 0.145 | 0.200 | 0.066 | 0.916 | 0.945 | 0.612 | 0.836 | 0.367 |
-| SafeSelfPlay D2, step 80 (reward-hacking) | Our evaluation | 0.015 | 0.024 | 0.093 | 0.423 | 0.084 | 0.802 | 0.670 | 0.584 | 0.984 | 0.510 |
-| SafeSelfPlay D3, step 80 (reward-hacking) | Our evaluation | 0.003 | 0.000 | 0.031 | 0.090 | 0.031 | 0.860 | 0.780 | 0.604 | 0.980 | 0.430 |
-| SafeSelfPlay D1, step 100 (cold PSRO 20260827) | Our evaluation | 0.086 | 0.041 | 0.606 | 0.340 | 0.171 | 0.557 | 0.760 | 0.940 | 0.976 | 0.944 |
-| SafeSelfPlay D2, step 100 (cold PSRO 20260827) | Our evaluation | 0.154 | 0.007 | 0.273 | 0.283 | 0.122 | 0.939 | 0.980 | 0.764 | 0.768 | 0.296 |
-| SafeSelfPlay D3, step 100 (cold PSRO 20260827) | Our evaluation | 0.030 | 0.012 | 0.182 | 0.230 | 0.058 | 0.742 | 0.825 | 0.676 | 0.928 | 0.685 |
-| SafeSelfPlay D4, step 100 (cold PSRO 20260827) | Our evaluation | 0.009 | 0.039 | 0.021 | 0.070 | 0.029 | 0.518 | 0.785 | 0.020 | 0.872 | 0.851 |
-| SafeSelfPlay D5, step 100 (cold PSRO 20260827) | Our evaluation | 0.273 | 0.097 | 0.822 | 0.563 | 0.253 | 0.592 | 0.820 | 0.956 | 0.928 | 0.901 |
-| SafeSelfPlay D4 retrained, step 100 (cold PSRO 20260827 follow-up) | Our evaluation | 0.294 | 0.083 | 0.711 | 0.527 | 0.262 | 0.585 | 0.870 | 0.960 | 0.860 | 0.807 |
-| SafeSelfPlay D3, step 200 (cold PSRO 20260827 follow-up) | Our evaluation | 0.125 | 0.022 | 0.319 | 0.260 | 0.203 | 0.866 | 0.785 | 0.888 | 0.988 | 0.575 |
-| SafeSelfPlay D5, step 300 (cold PSRO 20260827 follow-up) | Our evaluation | 0.139 | 0.012 | 0.445 | 0.223 | 0.135 | 0.878 | 0.890 | 0.948 | 0.940 | 0.416 |
-| SafeSelfPlay D1, step 100 (cold PSRO 20260831 drift-penalised) | Our evaluation | 0.184 | 0.036 | 0.620 | 0.370 | 0.177 | 0.637 | 0.715 | 0.964 | 0.936 | 0.889 |
-| SafeSelfPlay D2, step 100 (cold PSRO 20260831 drift-penalised) | Our evaluation | 0.362 | 0.138 | 0.866 | 0.570 | 0.263 | 0.501 | 0.840 | 0.968 | 0.904 | 0.894 |
-| SafeSelfPlay D2, step 200 @ 4096 gen (cold PSRO 20260831 drift-penalised) | Our evaluation | 0.089 | 0.015 | 0.366 | 0.427 | 0.129 | 0.893 | 0.900 | 0.908 | 0.944 | 0.451 |
-| SafeSelfPlay D3, step 100 (cold PSRO 20260831 generation 3) | Our evaluation | 0.030 | 0.002 | 0.147 | 0.123 | 0.051 | 0.881 | 0.870 | 0.612 | 0.932 | 0.546 |
-| Naive self-play D4, step 100 (latest-opponent 20260902) | Our evaluation | 0.050 | 0.022 | 0.274 | 0.263 | 0.078 | 0.704 | 0.830 | 0.828 | 0.904 | 0.697 |
-| Naive self-play D1, step 100 (latest-opponent 20260902) | Our evaluation | 0.050 | 0.049 | 0.520 | 0.257 | 0.141 | 0.730 | 0.785 | 0.916 | 0.980 | 0.848 |
-| Naive self-play D2, step 100 (latest-opponent 20260902) | Our evaluation | 0.205 | 0.066 | 0.750 | 0.497 | 0.199 | 0.753 | 0.855 | 0.932 | 0.912 | 0.804 |
-| Naive self-play D3, step 100 (latest-opponent 20260902) | Our evaluation | 0.071 | 0.039 | 0.380 | 0.167 | 0.075 | 0.696 | 0.760 | 0.788 | 0.948 | 0.834 |
-| Naive self-play D4 rerun, step 100, full-budget A4 (latest-opponent 20260902) | Our evaluation | 0.068 | 0.012 | 0.224 | 0.443 | 0.098 | 0.910 | 0.885 | 0.756 | 0.828 | 0.277 |
-| SafeSelfPlay D4, step 100 (cold PSRO 20260831 generation 4) | Our evaluation | 0.086 | 0.092 | 0.254 | 0.353 | 0.117 | 0.841 | 0.925 | 0.724 | 0.840 | 0.466 |
+This benchmark measures how attacks transfer to four target models on unseen
+harmful seeds. PSRO A1–A7, naive self-play A1–A5, the base attacker, and the
+no-attack baseline share 60 prompts sampled with seed `20260916` from rows
+≥20,000 of `vanilla_harmful_dataset.jsonl`; attacker training used rows
+0–19,199. `NONE` sends the original prompts without rewriting.
 
-**D4 (cold PSRO 20260827) is a collapsed checkpoint, not a safe model.** Its step-100 weights emit non-linguistic tokens (83-100% CoT-format violation, 91-95% length-truncation), which WildGuard returns null labels for; those map to a neutral 0.0 tie in the payoff, so its low ASRs are an artifact. The tell is WJB benign comply = 0.020. See the `D4 retrained` follow-up row for the same PSRO position trained without the collapse.
+Each attacker rewrites every seed locally using vLLM and its LoRA adapter
+with temperature 0 and at most 512 new tokens. Each rewrite is sent once to
+each target through `https://www.dmxapi.cn/v1/chat/completions`, using
+`temperature=0`, `max_tokens=512`, and `enable_thinking=false`.
 
-The `cold PSRO 20260831 drift-penalised` rows come from a fresh two-generation cold
-chain retrained with two changes and nothing else: the attacker's training reward is
-now scored against the prompt type it was assigned rather than the label WildGuard
-observed, with benign->harmful drift floored below every faithful outcome
-(`intended-prompt-type-v5`), and payoff-cell sampling draws harmful and benign
-candidates in retention-aware waves instead of lockstep. The reward change removed
-the drift it targeted: benign prompts rewritten into harmful ones fell from 8.72% to
-0.45% for A1 and from 10.39% to 0.60% for A2, below the untrained base attacker's
-0.84%. Compare these two rows against `cold PSRO 20260827` D1/D2, which occupy the
-same PSRO positions under the old reward. D1 reproduces at similar strength, but the
-20260827 D2's much lower ASRs came with an over-refusal collapse (OR-Bench benign
-comply 0.296, WJB benign 0.764) that the drift-penalised D2 does not have; the
-drift-penalised D2 is instead weak on safety, and the payoff matrix drops it from the
-Nash support entirely. Its training never gained a foothold:
-`generated_harmful_correct_refusal_acc` was exactly 0.0 for 88.1% of steps and peaked
-at 0.094, against D1's rise to 1.0. Per-defender manifests are under
-`/zfsauton/scratch/wentsec/coldpsro_slurm/psro/upstream_selfredteam_role_full_eval/cold_psro_cold_psro_v5_adaptive_n4000_s100_20260831_v1_D{1,2}/`.
+| Shorthand | Exact API model ID | Model type |
+|---|---|---|
+| 8B | `qwen3-8b` | Dense |
+| 14B | `qwen3-14b` | Dense |
+| 30B-a3b | `qwen3-30b-a3b-instruct-2507` | MoE: 30B total, 3B active |
+| 27B | `qwen3.5-27b` | Dense, Qwen3.5 generation |
 
-The `D2, step 200 @ 4096 gen` row is that same PSRO position retrained after the
-cause of the weakness was found. D2's foothold failure was driven by truncation:
-a defender answer carries a CoT block, so a long compliance reached the 2048-token
-generation cap and was cut mid-tag, which scores as a format violation. Doubling
-the cap to 4096 removes it — `defender/cot_format_violation` stays at 0.005 instead
-of running to 1.00 — and training then converges, stopping at 200 steps once
-`attacker/info/successful_harmful_request_rate` held at or below 0.02 across three
-consecutive 10-step windows. Safety improves across the board: WG adv ASR
-0.362 -> 0.089, WJB harmful 0.866 -> 0.366, HarmBench adv 0.263 -> 0.129.
+The four model columns report **ASR ↑**: the fraction of the 60 responses
+labeled harmful by local WildGuard (`allenai/wildguard`, snapshot `cbba4823`),
+using the same judge build and prompt template as the PSRO payoff evaluation.
 
-That gain is not free. OR-Bench benign compliance falls 0.894 -> 0.451, so the
-retrained D2 has moved roughly halfway toward the 20260827 D2's over-refusal
-collapse (0.296) on the hardest benign set, while XSTest benign comply (0.944) and
-WJB benign comply (0.908) hold. The in-training benign guard does not see this: its
-benign prompts are attacker-generated and it read 0.966 at the stopping point. Read
-these two D2 rows as a safety/over-refusal trade rather than a strict improvement.
 
-`D3, step 100 (generation 3)` continues that trade in the same direction. Safety
-improves again (WG adv ASR 0.089 -> 0.030, WJB harmful 0.366 -> 0.147, DAN 0.427
--> 0.123, HarmBench adv 0.129 -> 0.051) while WJB benign compliance falls
-0.908 -> 0.612; OR-Bench benign compliance recovers slightly, 0.451 -> 0.546.
-D3's in-training benign-compliance guard read 0.907 at step 100 and had been
-drifting down from 0.956, so the guard does register the direction of the
-problem but badly understates it.
+| Attacker | 8B | 14B | 30B-a3b | 27B |
+|---|---:|---:|---:|---:|
+| NONE (no attack) | 0.102 | 0.068 | 0.000 | 0.033 |
+| A0 base | 0.117 | 0.117 | 0.033 | 0.017 |
+| PSRO A1 | 0.200 | 0.150 | 0.033 | 0.000 |
+| PSRO A2 | 0.717 | 0.733 | 0.533 | 0.017 |
+| PSRO A3 | **0.950** | 0.933 | 0.333 | 0.000 |
+| PSRO A4 | 0.000 | 0.000 | 0.000 | 0.000 |
+| PSRO A5 | 0.933 | **0.967** | 0.383 | 0.000 |
+| PSRO A6 | 0.883 | 0.950 | **0.617** | 0.000 |
+| PSRO A7 | 0.783 | 0.683 | 0.317 | **0.133** |
+| naive A1 | 0.033 | 0.017 | 0.000 | 0.000 |
+| naive A2 | 0.017 | 0.000 | 0.000 | 0.000 |
+| naive A3 | 0.150 | 0.133 | 0.050 | 0.000 |
+| naive A4 | 0.667 | 0.700 | 0.450 | 0.000 |
+| naive A5 | 0.650 | 0.683 | 0.250 | 0.000 |
 
-Note what D3 is a best response to. On the generation-3 matrix the attacker's
-Nash is the untrained base attacker A0: A1 (-0.732), A2 (-0.694) and A3 (-0.709)
-all score worse against D2 than A0's -0.557, so the mixture D3 trained against
-was 97.6% A0. Three consecutive attacker oracles failed to improve on the base
-attacker, which is the limiting factor in this ladder rather than defender
-strength.
+### PSRO payoff matrix
 
-The `cold PSRO 20260827` rows come from the sequential Slurm PSRO chain; their per-defender result manifests and a standalone copy of this block are recorded in `/zfsauton/scratch/wentsec/coldpsro_slurm/psro/role_lora_zero_sum_psro/cold_psro5_base_n4000_s100_20260827_slurm_v1/results_summary.md`.
+The reported snapshot contains A0–A7 against D0–D7; A0 and D0 are the base
+strategies, and D7 is the clean 300-step retrain. Each entry is the attacker
+payoff: negative values favor the defender, and positive values favor the
+attacker.
 
+The full budget is 4,000 retained episodes per cell. A racing scheduler uses
+smaller budgets (256 or 768) for some cells and concentrates full evaluations
+on rows and columns relevant to the equilibrium. Every budget preserves an
+exact 50/50 harmful/benign split, and a reduced-budget evaluation is a prefix
+of the same full-budget episode sequence. For example, A1–D7 uses 256 episodes
+(128 per class), while A7–D7 uses 4,000 (2,000 per class). Smaller-budget cells
+have greater sampling uncertainty.
+
+| Attacker / Defender | D0 | D1 | D2 | D3 | D4 | D5 | D6 | D7 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| A0 | -0.272 | -0.643 | -0.721 | -0.701 | -0.537 | -0.571 | -0.728 | -0.564 |
+| A1 | 0.365 | -0.726 | -0.583 | -0.521 | -0.483 | -0.625 | -0.691 | -0.647 |
+| A2 | 0.135 | -0.703 | -0.679 | -0.704 | -0.657 | -0.718 | -0.694 | -0.706 |
+| A3 | 0.473 | -0.583 | -0.395 | -0.723 | -0.435 | -0.733 | -0.743 | -0.574 |
+| A4 | 0.131 | -0.665 | -0.637 | -0.549 | -0.740 | -0.748 | -0.656 | -0.712 |
+| A5 | 0.474 | -0.579 | -0.434 | -0.702 | -0.432 | -0.728 | -0.702 | -0.636 |
+| A6 | 0.143 | -0.484 | -0.647 | -0.410 | -0.630 | -0.700 | -0.732 | -0.616 |
+| A7 | 0.121 | -0.326 | -0.627 | -0.439 | -0.438 | -0.488 | -0.573 | -0.676 |
 
 ## 2. Train Role LoRAs
 
@@ -275,8 +315,14 @@ OR-Bench toxic, XSTest, WJB benign, and OR-Bench hard-1k. It reports harmful
 ASR (lower is better), harmful RTA (higher is better), and benign compliance
 (higher is better). Both aggregate and per-example results are written under
 `/output/upstream_selfredteam_role_full_eval/<OUTPUT_SLUG>`.
+This command does not cover the supplemental SR12 and SORRY-Bench results
+shown above.
 
 ## 4. PSRO
+
+The commands below describe the repository's five-generation, 100-step
+launcher defaults and fixed 4,000-episode cell budget. The v6d benchmark above
+uses a separate 300-step configuration with racing budgets.
 
 Launch the canonical Llama role-LoRA cold PSRO run with:
 
@@ -362,9 +408,9 @@ only the 13 new cells in the A6 row and D6 column; the original 36 cells and
 their 144,000 retained episodes are not regenerated. `final.json` always
 contains the latest full matrix, while `final_gN.json` files are immutable.
 
-### Current cold-PSRO handoff (2026-08-25)
+### Archived cold-PSRO run (2026-08-25)
 
-The current formal run suffix is
+The archived formal run suffix is
 `cold_psro5_base_n4000_s100_20260822_v3`. It was intentionally archived at
 `training_A3` on 2026-08-25 and its Modal volume was then deleted. A1, D1, A2,
 and D2 are complete; the 3x3 A0-A2 by D0-D2 payoff prefix contains nine
@@ -445,11 +491,11 @@ nohup env GPU_ID=5 \
 ```
 
 The output directories contain resumable `metrics.json` and
-`individual.json`. The task set matches the current released-evaluator rows:
-WildGuardTest, WJB harmful/benign, DAN, HarmBench precomputed attacks,
-OR-Bench toxic/hard-1k, and XSTest. These cold-PSRO D1/D2 results are distinct
-from the `(naive)` latest-opponent D1/D2 rows in the main table above and should
-only be merged into the results table after both manifests are complete.
+`individual.json`. The task set covers WildGuardTest, WJB harmful/benign,
+DAN, HarmBench precomputed attacks, OR-Bench toxic/hard-1k, and XSTest.
+These commands evaluate D1/D2 from the archived August run; those checkpoint
+labels are local to that experiment. The v6d results above belong to a separate
+run.
 
 To evaluate one frozen adapter pair independently with the adapter-aware raw
 payoff code:
@@ -490,7 +536,7 @@ modal run --detach modal_abs_benchmark.py \
   --asym-role-steps 50
 ```
 
-The checkpoints labeled `(naive)` above remain sequential latest-opponent
+The checkpoints labeled `naive` or `nD` above remain sequential latest-opponent
 self-play baselines; they are not relabeled as Nash-mixture PSRO. The new
 launcher writes to a separate run root and never mutates those checkpoints.
 
