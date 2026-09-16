@@ -201,13 +201,13 @@ using the same judge build and prompt template as the PSRO payoff evaluation.
 | naive A1 | 0.033 | 0.017 | 0.000 | 0.000 |
 | naive A2 | 0.017 | 0.000 | 0.000 | 0.000 |
 | naive A3 | 0.150 | 0.133 | 0.050 | 0.000 |
-| naive A4 | 0.667 | 0.700 | 0.450 | 0.000 |
+| naive A4 | 0.667 | 0.700 | 0.250 | 0.000 |
 | naive A5 | 0.650 | 0.683 | 0.250 | 0.000 |
 
 ### PSRO payoff matrix
 
 The reported snapshot contains A0–A7 against D0–D7; A0 and D0 are the base
-strategies, and D7 is the clean 300-step retrain. Each entry is the attacker
+strategies. Each entry is the attacker
 payoff: negative values favor the defender, and positive values favor the
 attacker.
 
