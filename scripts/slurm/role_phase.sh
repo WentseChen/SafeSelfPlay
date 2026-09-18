@@ -24,6 +24,9 @@ HF_ROOT=${SSP_HF_HOME:-$SSP_ROOT/hf}
 SFT_DIR=${SSP_SFT_DIR:-$SSP_ROOT/sft_data}
 PSRO=${SSP_OUT:-$SSP_ROOT/psro}
 PY=${SSP_PYTHON:-python}
+# This repository: role_phase.sh lives in scripts/slurm/ inside it, so derive
+# the root from $0 rather than requiring yet another exported variable.
+SSP_REPO=${SSP_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}
 GPUS=${GPUS:-4}
 # DeepSpeed JIT-builds FusedAdam on first use and that needs `ninja`, which
 # lives in the interpreter's own bin rather than on the login PATH; without it
@@ -166,18 +169,53 @@ BASE=${BASE_MODEL_PATH:-$(ls -d "$HF_ROOT"/hub/models--mlabonne--Meta-Llama-3.1-
 JUDGE=${JUDGE_MODEL_PATH:-$(ls -d "$HF_ROOT"/hub/models--allenai--wildguard/snapshots/*/ | head -1)}
 IP=$(hostname -I | awk '{print $1}')
 JUDGE_PORT=${JUDGE_PORT:-5100}
+# Off-topic verifier. OFFTOPIC_ENABLE=0 disables the term entirely (the
+# patched language_game.py skips the call when OFFTOPIC_URL is empty).
+OFFTOPIC_ENABLE=${OFFTOPIC_ENABLE:-1}
+OFFTOPIC_PORT=${OFFTOPIC_PORT:-$((JUDGE_PORT + 200))}
+OFFTOPIC_UTIL=${OFFTOPIC_UTIL:-0.24}
 RAY_PORT=${RAY_PORT:-6100}
 RM_URL=http://$IP:$JUDGE_PORT/classify
 cd "$WORK"
 
-CUSTOM=$($PY - "$ROLE" "$SFT_STOP" "$EXACT_LABEL_BALANCE" "$LABEL_DRIFT_POLICY" \
-        "${ACTOR_LR_SCHEDULER:-constant_with_warmup}" "$ATTACKER_OBJECTIVE" <<'PY'
+# Does every frozen opponent that carries weight have an adapter?  Only then is
+# it safe (and correct) to render the frozen defender with its CoT scaffold:
+# the base model never learned the template and prefilling it is a jailbreak.
+# A trained frozen defender is rendered WITH the scaffold in every payoff cell
+# and benchmark, so attacker training must match.
+DEFENDER_COT_FROZEN=$($PY - "${OPPONENT_POOL_JSON:-}" "${OPPONENT:-}" <<'PYPOOL'
 import json, sys
-role, sft_stop, balance, drift, scheduler, attacker_objective = sys.argv[1:7]
+pool_json, single = sys.argv[1], sys.argv[2]
+if pool_json:
+    try:                       # the flag is a path in normal use
+        pool = json.load(open(pool_json))
+    except (OSError, ValueError):   # ... but accept inline JSON too
+        pool = json.loads(pool_json)
+    weighted = [e for e in pool if float(e.get("probability", 0.0)) > 1e-9]
+    ok = bool(weighted) and all(e.get("adapter") for e in weighted)
+else:
+    ok = bool(single)          # a single named opponent adapter, or base -> False
+print("1" if ok else "0")
+PYPOOL
+)
+
+CUSTOM=$($PY - "$ROLE" "$SFT_STOP" "$EXACT_LABEL_BALANCE" "$LABEL_DRIFT_POLICY" \
+        "${ACTOR_LR_SCHEDULER:-constant_with_warmup}" "$ATTACKER_OBJECTIVE" \
+        "$DEFENDER_COT_FROZEN" <<'PY'
+import json, sys
+role, sft_stop, balance, drift, scheduler, attacker_objective, defender_cot_frozen = sys.argv[1:8]
 config = {
     "max_turns": 2, "reward_type": "general_sum", "remove_ties": True,
     "redistribute_after_ties": True,
     "no_defender_turn": role == "attacker",
+    # Render the frozen defender WITH its CoT wrapper + prefill during attacker
+    # training, matching how every payoff cell and benchmark renders a trained
+    # defender.  no_defender_turn also selects which turns are optimizer items,
+    # so it cannot carry this meaning too -- hence a separate key.  The base
+    # model (D0) never learned the template and prefilling it is a known
+    # jailbreak, so the renderer keeps the bare wrapper when the frozen
+    # opponent has no adapter.
+    "defender_cot_when_frozen": defender_cot_frozen == "1",
     "no_attacker_turn": False,
     "optimizer_train_role": role,
     "fixed_defender_from_opponent_vllm": role == "attacker",
@@ -246,10 +284,18 @@ TRAIN_CMD=("$PY" -m openrlhf.cli.train_ppo_ray
   --prompt_max_len "${PROMPT_MAX_LEN:-2048}" --generate_max_len "${GENERATE_MAX_LEN:-2048}"
   --zero_stage 3 --num_episodes 1 --bf16 --seed "${TRAINING_SEED:-8888}" --top_p 1.0
   --gradient_checkpointing --gradient_checkpointing_use_reentrant
+  # Reverse-KL anchor to the BASE model, on by default for BOTH roles at
+  # coef 0.01. INIT_KL_COEF>0 turns the monitored reference KL into a loss term. The
+  # estimator is k1 over policy samples, E_pi[log pi - log pi_ref], i.e.
+  # REVERSE KL(pi || pi_ref). The reference is built with
+  # --role_start_adapter, so it equals the BASE model only when that is
+  # unset -- true for a cold oracle with mid-run resume disabled. Hot start
+  # or a resumed segment would anchor to the round start instead, which the
+  # driver now refuses when a penalty is active.
   --monitor_reference_kl --temperature 1.0 --lr_warmup_ratio "${LR_WARMUP_RATIO:-0.03}"
   --sft_data "$SFT_DATA" --sft_data_probs "$SFT_PROBS"
   --sft_steps 1 --sft_batches_per_step "${SFT_BATCHES_PER_STEP:-1}" "${SFT_KEYS[@]}"
-  --actor_learning_rate "$LR" --init_kl_coef 0
+  --actor_learning_rate "$LR" --init_kl_coef "${INIT_KL_COEF:-0.01}"
   --normalize_reward --packing_samples
   --advantage_estimator reinforce
   --custom_configs "$CUSTOM"
@@ -290,6 +336,32 @@ for i in $(seq 1 90); do
   sleep 10
 done
 echo "$TAG judge up after ~$((i * 10))s"
+
+# --- off-topic verifier -------------------------------------------------------
+# Shares GPU 0 with the judge: both are idle for most of a step.  It answers one
+# question WildGuard structurally cannot -- does the rewrite still ask what the
+# seed asked -- which is what stops the attacker collapsing onto a single
+# memorized prompt.  Optional: if it fails to come up we train without the term
+# rather than lose the run, and the episode rows record the verdict as absent.
+export OFFTOPIC_URL=""
+if [ "$OFFTOPIC_ENABLE" = 1 ]; then
+  CUDA_VISIBLE_DEVICES=0 OFFTOPIC_MODEL="$BASE" OFFTOPIC_PORT="$OFFTOPIC_PORT" \
+  OFFTOPIC_UTIL="$OFFTOPIC_UTIL" \
+  nohup "$PY" "$SSP_REPO/scripts/slurm/serve_offtopic.py" \
+    > "$OUT/offtopic.log" 2>&1 &
+  OFFTOPIC_PID=$!
+  trap 'kill $JUDGE_PID $OFFTOPIC_PID 2>/dev/null || true' EXIT
+  for i in $(seq 1 60); do
+    curl -s -m 5 "http://$IP:$OFFTOPIC_PORT/health" 2>/dev/null | grep -q '"ok"' && {
+      export OFFTOPIC_URL="http://$IP:$OFFTOPIC_PORT/verify_topic"
+      echo "$TAG off-topic verifier up after ~$((i * 5))s"; break; }
+    kill -0 $OFFTOPIC_PID 2>/dev/null || { echo "$TAG off-topic verifier died; continuing without the penalty" >&2; break; }
+    sleep 5
+  done
+  [ -n "$OFFTOPIC_URL" ] || echo "$TAG off-topic verifier not ready; continuing without the penalty" >&2
+else
+  echo "$TAG off-topic penalty disabled (OFFTOPIC_ENABLE=0)"
+fi
 
 # --- ray ----------------------------------------------------------------------
 # One head per node: two concurrent phases on the same node corrupt each other's
