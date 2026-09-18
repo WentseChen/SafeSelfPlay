@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import Any
 
 import modal
+from roll.utils.shared_game_reward import shared_game_reward_enabled, shared_game_reward_contract
+from roll.utils.topic_api import label_topic_queries
 
 if os.path.isdir("/roll") and "/roll" not in sys.path:
     sys.path.insert(0, "/roll")
@@ -1014,6 +1016,8 @@ def evaluate_upstream_v2_raw_payoff_cell(
             else "upstream_defender_cot"
         ),
     }
+    if shared_game_reward_enabled():
+        manifest["shared_game_reward"] = shared_game_reward_contract()
     manifest_path = output_dir / "manifest.json"
     summary_path = output_dir / "summary.json"
     if manifest_path.is_file():
@@ -1569,6 +1573,19 @@ def evaluate_upstream_v2_raw_payoff_cell(
                 queries,
                 batch_size=judge_batch_size,
             )
+
+            if shared_game_reward_enabled():
+                topic_queries = [
+                    {"game_idx": int(spec["candidate_index"]),
+                     "seed": spec["seed_prompt"], "rewrite": attack["answer"]}
+                    for spec, attack, label in zip(specs, parsed_attacks, labels, strict=True)
+                    if not label.get("is_parsing_error", False)
+                    and not (spec["prompt_type"] == "generated_benign"
+                             and label.get("prompt_harmfulness") == "harmful")
+                ]
+                topic_labels = {v["game_idx"]: v for v in label_topic_queries(topic_queries)}
+                for spec, label in zip(specs, labels, strict=True):
+                    label.update(topic_labels.get(int(spec["candidate_index"]), {}))
 
             wave_rows: list[dict[str, Any]] = []
             for (

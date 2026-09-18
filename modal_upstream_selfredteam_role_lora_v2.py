@@ -350,6 +350,9 @@ def _patch_asymmetric_label_drift_training() -> None:
         "    cap_label_drift_attacker_reward,\n"
         "    compute_attacker_reward_intended,\n"
         "    label_drift_training_action,\n"
+        ")\n"
+        "from roll.utils.shared_game_reward import (\n"
+        "    InvalidGame, compute_shared_game_reward, shared_game_reward_enabled,\n"
         ")\n",
         "role label-drift policy import",
     )
@@ -367,7 +370,17 @@ def _patch_asymmetric_label_drift_training() -> None:
             if labels.get('is_parsing_error', False):
                 continue
 
-            label_drift_action = label_drift_training_action(
+            shared_score = None
+            if shared_game_reward_enabled() and game["prompt_type"] in {"generated_harmful", "generated_benign"}:
+                try:
+                    shared_score = compute_shared_game_reward(
+                        prompt_type=game["prompt_type"], labels=labels,
+                    )
+                except InvalidGame:
+                    # The same invalid games are omitted by matrix estimation.
+                    continue
+
+            label_drift_action = "keep" if shared_score is not None else label_drift_training_action(
                 optimizer_train_role=self.custom_configs.get(
                     "optimizer_train_role"
                 ),
@@ -391,7 +404,19 @@ def _patch_asymmetric_label_drift_training() -> None:
         """                turn_states['reward'] = reward
                 turn_states['game_outcomes'] = outcome
 """,
-        """                if (
+        """                if shared_score is not None:
+                    role = turn_states["game_role"]
+                    reward = shared_score[f"{role}_zero_sum_reward"]
+                    turn_states["reward_before_topic_penalty"] = (
+                        shared_score["base_attacker_zero_sum_reward"] * (1 if role == "attacker" else -1)
+                    )
+                    turn_states["topic_off_topic"] = int(labels["off_topic"])
+                    turn_states["topic_reward_component"] = (
+                        shared_score["topic_reward_component"] * (1 if role == "attacker" else -1)
+                    )
+                    turn_states["topic_judge_model"] = labels.get("topic_judge_model", "")
+                    turn_states["topic_prompt_version"] = labels.get("topic_prompt_version", "")
+                elif (
                     turn_states["game_role"] == "attacker"
                     and self.custom_configs.get("attacker_objective")
                     == ATTACKER_OBJECTIVE_INTENDED
@@ -434,6 +459,8 @@ def _patch_asymmetric_label_drift_training() -> None:
             'prompt_origin', 'label_drift_action',
             'reward_before_label_drift_cap',
             'reward_upstream_objective', 'attacker_label_drift',
+            'reward_before_topic_penalty', 'topic_off_topic',
+            'topic_reward_component', 'topic_judge_model', 'topic_prompt_version',
 """,
         "label-drift diagnostics in replay metadata",
     )
@@ -1822,6 +1849,35 @@ def _patch_llamafactory_lora_initialization() -> None:
     )
 
 
+def _patch_shared_game_reward_metrics() -> None:
+    _replace_once(
+        UPSTREAM_WORK / "openrlhf/trainer/ppo_utils/replay_buffer.py",
+        """        reward_stats = reduced_stats(
+            [item.info["reward"] for item in train_items]
+        )
+""",
+        """        from roll.utils.shared_game_reward import shared_game_reward_enabled
+        if shared_game_reward_enabled():
+            # Every rank executes the same reductions, including empty ranks.
+            for field in ("topic_off_topic", "topic_reward_component", "reward_before_topic_penalty"):
+                values = [scalar(item.info[field]) for item in train_items
+                          if item.info.get(field) is not None]
+                count = strategy.all_reduce(float(len(values)), "sum")
+                total = strategy.all_reduce(float(sum(values)), "sum")
+                if count:
+                    game_status[f"topic/{field}"] = total / count
+            labelled = strategy.all_reduce(float(sum(item.info.get("topic_off_topic") is not None for item in train_items)), "sum")
+            total_items = strategy.all_reduce(float(len(train_items)), "sum")
+            game_status["topic/label_coverage"] = labelled / total_items if total_items else 0.0
+
+        reward_stats = reduced_stats(
+            [item.info["reward"] for item in train_items]
+        )
+""",
+        "shared terminal reward diagnostics",
+    )
+
+
 def _prepare_lora_v2_upstream() -> None:
     """Prepare a clean upstream tree without the legacy LoRA interface."""
     _prepare_upstream_source()
@@ -1855,6 +1911,7 @@ def _prepare_lora_v2_upstream() -> None:
     _patch_attacker_sft_rl_format()
     _patch_exact_prompt_label_balance()
     _patch_asymmetric_label_drift_training()
+    _patch_shared_game_reward_metrics()
 
 
 def _adapter_checkpoint(path: Path) -> bool:

@@ -9,10 +9,9 @@ only usable once both are rewritten in lockstep.
 
 Two further edits are required and are recorded in ``seed_provenance.json``:
 
-* ``contract.implementation_sha256`` is replaced with the hashes of the sources
-  that will actually run here.  Keeping the archived hashes would make
-  ``advance_cold_psro`` reject the run as a changed contract.  Only ``trainer``
-  differs, and only by the engine-init barrier added in 897f77e.
+* ``contract.implementation_sha256`` records the current implementation for
+  provenance, while the archived values remain in ``seed_provenance.json``.
+  Source hashes no longer gate resume; parameter and artifact checks still do.
 * ``oracle_specs["A3"]`` / ``matrices/before_A3.json`` and the partial
   ``training/A3`` directory are dropped, so A3 is trained fresh here rather than
   resumed.  Both are re-derived byte-identically from the nine seeded cells.

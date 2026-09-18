@@ -19,7 +19,7 @@ not count, and resets the streak.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 
 STEP_RE = re.compile(r"\|\s*(\d+)/(\d+)\s*\[")
 
@@ -103,8 +103,28 @@ class EarlyStop:
     reason: str = ""
     streak: int = 0
     measurements: list[Measurement] = field(default_factory=list)
-    _seen: dict[int, tuple[float, float | None]] = field(default_factory=dict)
+    _seen: dict[int, tuple[float, float | None, float | None]] = field(default_factory=dict)
     _done: set[int] = field(default_factory=set)
+
+    def __post_init__(self):
+        if self.mode not in {"threshold", "plateau"}:
+            raise ValueError("early-stop mode must be threshold or plateau")
+        if min(self.window, self.patience, self.min_coverage, self.abort_patience) < 1:
+            raise ValueError("early-stop windows, patience and coverage must be positive")
+        if self.min_coverage > self.window or self.min_step < 0:
+            raise ValueError("invalid early-stop coverage or minimum step")
+
+    def configuration(self) -> dict:
+        return {key: getattr(self, key) for key in (
+            "metric", "guard_metric", "threshold", "guard_min", "window", "patience",
+            "min_step", "min_coverage", "ceiling_metric", "ceiling_max", "abort_max",
+            "abort_patience", "mode", "min_delta",
+        )}
+
+    def report(self) -> dict:
+        return {"configuration": self.configuration(), "triggered": self.triggered,
+                "collapsed": self.collapsed, "reason": self.reason,
+                "measurements": [asdict(value) for value in self.measurements]}
 
     def patterns(self) -> dict[str, re.Pattern]:
         names = [self.metric, self.guard_metric]
@@ -126,7 +146,10 @@ class EarlyStop:
         low = step - self.window + 1
         points = [self._seen[s] for s in range(low, step + 1) if s in self._seen]
         if len(points) < self.min_coverage:
+            self.streak = self.plateau_streak = self.abort_streak = 0
             return None
+        if self._done and step - max(self._done) > self.window:
+            self.streak = self.plateau_streak = self.abort_streak = 0
         self._done.add(step)
 
         primary_mean = sum(p[0] for p in points) / len(points)
@@ -135,8 +158,13 @@ class EarlyStop:
         ceilings = [p[2] for p in points if p[2] is not None]
         ceiling_mean = sum(ceilings) / len(ceilings) if ceilings else None
 
-        guard_ok = guard_mean is None or guard_mean >= self.guard_min
-        ceiling_ok = ceiling_mean is None or ceiling_mean <= self.ceiling_max
+        # A missing guard must not turn "unknown" into a successful window.
+        guard_ok = not self.guard_metric or (
+            len(guards) >= self.min_coverage and guard_mean >= self.guard_min
+        )
+        ceiling_ok = not self.ceiling_metric or (
+            len(ceilings) >= self.min_coverage and ceiling_mean <= self.ceiling_max
+        )
         if self.mode == "plateau":
             if primary_mean > self.best_primary + self.min_delta:
                 self.best_primary = primary_mean
@@ -158,7 +186,7 @@ class EarlyStop:
 
         # Collapse abort: the ceiling metric running away means the model is
         # degenerating, and every downstream metric is then meaningless.
-        if ceiling_mean is not None and ceiling_mean >= self.abort_max:
+        if len(ceilings) >= self.min_coverage and ceiling_mean >= self.abort_max:
             self.abort_streak += 1
         else:
             self.abort_streak = 0

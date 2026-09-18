@@ -76,7 +76,7 @@ GENERATE_MAX_LEN=${GENERATE_MAX_LEN:-2048}
 # Same org/project/group/run-id scheme as modal_upstream_selfredteam_role_lora_v2
 # so a requeued phase reattaches to its existing run instead of forking a new
 # one. The key is read from WANDB_API_KEY only and is never written to disk.
-WANDB_ENTITY=${WANDB_ENTITY:-2373025856w-the-university-of-hong-kong}
+WANDB_ENTITY=${WANDB_ENTITY:-}
 WANDB_PROJECT=${WANDB_PROJECT:-self-play}
 WANDB_GROUP=${WANDB_GROUP:-upstream-selfredteam-role-lora-v2}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
@@ -169,8 +169,8 @@ BASE=${BASE_MODEL_PATH:-$(ls -d "$HF_ROOT"/hub/models--mlabonne--Meta-Llama-3.1-
 JUDGE=${JUDGE_MODEL_PATH:-$(ls -d "$HF_ROOT"/hub/models--allenai--wildguard/snapshots/*/ | head -1)}
 IP=$(hostname -I | awk '{print $1}')
 JUDGE_PORT=${JUDGE_PORT:-5100}
-# Off-topic verifier. OFFTOPIC_ENABLE=0 disables the term entirely (the
-# patched language_game.py skips the call when OFFTOPIC_URL is empty).
+# Legacy local verifier. OFFTOPIC_ENABLE does not control the required
+# external topic API in GAME_REWARD_MODE=shared_binary.
 OFFTOPIC_ENABLE=${OFFTOPIC_ENABLE:-1}
 OFFTOPIC_PORT=${OFFTOPIC_PORT:-$((JUDGE_PORT + 200))}
 OFFTOPIC_UTIL=${OFFTOPIC_UTIL:-0.24}
@@ -203,6 +203,7 @@ CUSTOM=$($PY - "$ROLE" "$SFT_STOP" "$EXACT_LABEL_BALANCE" "$LABEL_DRIFT_POLICY" 
         "${ACTOR_LR_SCHEDULER:-constant_with_warmup}" "$ATTACKER_OBJECTIVE" \
         "$DEFENDER_COT_FROZEN" <<'PY'
 import json, sys
+from roll.utils.shared_game_reward import shared_game_reward_enabled
 role, sft_stop, balance, drift, scheduler, attacker_objective, defender_cot_frozen = sys.argv[1:8]
 config = {
     "max_turns": 2, "reward_type": "general_sum", "remove_ties": True,
@@ -229,6 +230,9 @@ if drift:
     config["label_drift_training_policy"] = drift
 if attacker_objective:
     config["attacker_objective"] = attacker_objective
+if shared_game_reward_enabled():
+    config["remove_ties"] = False
+    config["redistribute_after_ties"] = False
 print(json.dumps(config))
 PY
 )
@@ -257,11 +261,12 @@ if [ -n "${WANDB_API_KEY:-}" ]; then
   export WANDB_MODE=${WANDB_MODE:-online}
   export WANDB_DIR=${WANDB_DIR:-$OUT}
   WANDB_ARGS=(--use_wandb "$WANDB_API_KEY"
-              --wandb_org "$WANDB_ENTITY" --wandb_project "$WANDB_PROJECT"
+              --wandb_project "$WANDB_PROJECT"
               --wandb_group "$WANDB_GROUP" --wandb_run_name "$WANDB_RUN_NAME"
               --wandb_max_log 10000 --wandb_table_log_interval 1
               --wandb_table_csv_path "$OUT/run_tables")
-  echo "$TAG wandb https://wandb.ai/$WANDB_ENTITY/$WANDB_PROJECT/runs/$WANDB_RUN_ID"
+  [ -z "$WANDB_ENTITY" ] || WANDB_ARGS+=(--wandb_org "$WANDB_ENTITY")
+  echo "$TAG wandb entity=${WANDB_ENTITY:-account-default} project=$WANDB_PROJECT run=$WANDB_RUN_ID"
 fi
 
 TRAIN_CMD=("$PY" -m openrlhf.cli.train_ppo_ray
@@ -305,6 +310,11 @@ TRAIN_CMD=("$PY" -m openrlhf.cli.train_ppo_ray
   --vllm_sync_backend nccl "${ENGINE_PERF[@]}" --flash_attn
   "${WANDB_ARGS[@]}")
 
+if [ "${GAME_REWARD_MODE:-legacy}" = shared_binary ]; then
+  REWARD_LIMIT=$($PY -c 'from roll.utils.shared_game_reward import topic_penalty; print(1 + topic_penalty())')
+  TRAIN_CMD+=(--reward_clip_range "-$REWARD_LIMIT" "$REWARD_LIMIT")
+fi
+
 if [ "${DRY_RUN:-0}" = 1 ]; then
   for arg in "${TRAIN_CMD[@]}"; do
     if [ -n "${WANDB_API_KEY:-}" ] && [ "$arg" = "$WANDB_API_KEY" ]; then
@@ -316,25 +326,62 @@ if [ "${DRY_RUN:-0}" = 1 ]; then
   exit 0
 fi
 
+if [ "${GAME_REWARD_MODE:-legacy}" = shared_binary ]; then
+  "$PY" -c 'from roll.utils.shared_game_reward import shared_game_reward_contract; shared_game_reward_contract()'
+fi
+
 # --- judge --------------------------------------------------------------------
+# Each service owns a process group so failed vLLM children release their GPUs.
+# Keep one exit trap: installing the Ray cleanup must not forget the verifier.
+JUDGE_PID=""
+OFFTOPIC_PID=""
+RAY_STARTED=0
+stop_service() {
+  local pid=${1:-}
+  [ -n "$pid" ] || return 0
+  kill -TERM -- "-$pid" 2>/dev/null || true
+  for _ in {1..25}; do
+    kill -0 -- "-$pid" 2>/dev/null || break
+    sleep 0.2
+  done
+  kill -KILL -- "-$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+cleanup() {
+  stop_service "$OFFTOPIC_PID"
+  stop_service "$JUDGE_PID"
+  if [ "$RAY_STARTED" = 1 ]; then ray_shutdown; fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 # The judge shares GPU 0: it is idle for most of a step, so a whole card is
 # waste. --max_len must stay at the upstream 8192; at 4096 a long transcript
 # returns 500 and takes the whole server down mid-run.
 CUDA_VISIBLE_DEVICES=0 RAY_TMPDIR=/tmp/ssp-judge-$JUDGE_PORT \
-nohup "$PY" -m openrlhf.cli.serve_wildguard \
+setsid "$PY" -m openrlhf.cli.serve_wildguard \
   --model_path "$JUDGE" --port "$JUDGE_PORT" --host "$IP" --bf16 \
   --num_gpus 1 --tensor_parallel_size 1 --enforce_eager --seed 42 \
   --max_len 8192 --max_num_seqs 32 --batch_size 32 \
   --gpu_memory_utilization "$JUDGE_UTIL" > "$OUT/judge.log" 2>&1 &
 JUDGE_PID=$!
-trap 'kill $JUDGE_PID 2>/dev/null || true' EXIT
-for i in $(seq 1 90); do
-  curl -s -m 5 -X POST "$RM_URL" -H 'Content-Type: application/json' \
+JUDGE_READY=0
+for i in $(seq 1 "${JUDGE_STARTUP_ATTEMPTS:-90}"); do
+  kill -0 "$JUDGE_PID" 2>/dev/null || { echo "judge died" >&2; tail -20 "$OUT/judge.log" >&2; exit 1; }
+  if curl --noproxy '*' -fsS -m 5 -X POST "$RM_URL" -H 'Content-Type: application/json' \
     -d '{"queries":[{"prompt":"hi","response":"hello","game_idx":0}],"prompts":null}' \
-    2>/dev/null | grep -q labels && break
-  kill -0 $JUDGE_PID 2>/dev/null || { echo "judge died" >&2; tail -20 "$OUT/judge.log" >&2; exit 1; }
+    2>/dev/null | grep -q '"labels"'; then
+    JUDGE_READY=1
+    break
+  fi
   sleep 10
 done
+if [ "$JUDGE_READY" != 1 ]; then
+  echo "judge did not become ready; see $OUT/judge.log" >&2
+  tail -20 "$OUT/judge.log" >&2
+  exit 1
+fi
 echo "$TAG judge up after ~$((i * 10))s"
 
 # --- off-topic verifier -------------------------------------------------------
@@ -344,21 +391,27 @@ echo "$TAG judge up after ~$((i * 10))s"
 # memorized prompt.  Optional: if it fails to come up we train without the term
 # rather than lose the run, and the episode rows record the verdict as absent.
 export OFFTOPIC_URL=""
-if [ "$OFFTOPIC_ENABLE" = 1 ]; then
+if [ "${GAME_REWARD_MODE:-legacy}" = shared_binary ]; then
+  # Labels come directly from the external API in both rollout and matrix code.
+  echo "$TAG external binary topic judge enabled; shared training/matrix reward"
+elif [ "$OFFTOPIC_ENABLE" = 1 ]; then
   CUDA_VISIBLE_DEVICES=0 OFFTOPIC_MODEL="$BASE" OFFTOPIC_PORT="$OFFTOPIC_PORT" \
   OFFTOPIC_UTIL="$OFFTOPIC_UTIL" \
-  nohup "$PY" "$SSP_REPO/scripts/slurm/serve_offtopic.py" \
+  setsid "$PY" "$SSP_REPO/scripts/slurm/serve_offtopic.py" \
     > "$OUT/offtopic.log" 2>&1 &
   OFFTOPIC_PID=$!
-  trap 'kill $JUDGE_PID $OFFTOPIC_PID 2>/dev/null || true' EXIT
-  for i in $(seq 1 60); do
-    curl -s -m 5 "http://$IP:$OFFTOPIC_PORT/health" 2>/dev/null | grep -q '"ok"' && {
+  for i in $(seq 1 "${OFFTOPIC_STARTUP_ATTEMPTS:-60}"); do
+    kill -0 "$OFFTOPIC_PID" 2>/dev/null || { echo "$TAG off-topic verifier died; continuing without the penalty" >&2; break; }
+    curl --noproxy '*' -fsS -m 5 "http://$IP:$OFFTOPIC_PORT/health" 2>/dev/null | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' && {
       export OFFTOPIC_URL="http://$IP:$OFFTOPIC_PORT/verify_topic"
       echo "$TAG off-topic verifier up after ~$((i * 5))s"; break; }
-    kill -0 $OFFTOPIC_PID 2>/dev/null || { echo "$TAG off-topic verifier died; continuing without the penalty" >&2; break; }
     sleep 5
   done
-  [ -n "$OFFTOPIC_URL" ] || echo "$TAG off-topic verifier not ready; continuing without the penalty" >&2
+  if [ -z "$OFFTOPIC_URL" ]; then
+    echo "$TAG off-topic verifier not ready; continuing without the penalty" >&2
+    stop_service "$OFFTOPIC_PID"
+    OFFTOPIC_PID=""
+  fi
 else
   echo "$TAG off-topic penalty disabled (OFFTOPIC_ENABLE=0)"
 fi
@@ -396,11 +449,11 @@ ray_shutdown() {
 # its own V1 engine by this point and is unaffected.
 export VLLM_USE_V1=${VLLM_USE_V1:-0}
 ray_shutdown; rm -rf "$RAY_TMPDIR"
+RAY_STARTED=1
 "$RAY_BIN" start --head --disable-usage-stats --temp-dir="$RAY_TMPDIR" \
   --port="$RAY_PORT" --include-dashboard=false \
   --ray-client-server-port=$((RAY_PORT + 2000)) --num-gpus="$GPUS" >/dev/null
 export RAY_ADDRESS=$IP:$RAY_PORT
-trap 'kill $JUDGE_PID 2>/dev/null || true; ray_shutdown' EXIT
 
 echo "$TAG start $(date +%H:%M:%S) role=$ROLE lr=$LR steps=$STEPS opponent=${OPPONENT:-${OPPONENT_POOL_JSON:-none}}" >> "$PSRO/state.txt"
 "${TRAIN_CMD[@]}"

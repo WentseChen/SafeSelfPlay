@@ -5,9 +5,12 @@ same patch chain, arguments and SFT mixture as
 `modal_upstream_selfredteam_role_lora_v2.py`. Intended for on-prem clusters
 where the Modal control plane is unreachable.
 
-This is **latest-opponent self-play**, the same schedule as
+The ladder is **latest-opponent self-play**, the same schedule as
 `run_selfredteam_lora_next_round_h200x4.sh`. For sequential double-oracle PSRO
-use `run_role_lora_cold_psro5_h200x4.sh`.
+on Slurm, use `submit_cold_psro.sh`; see the repository
+[setup and launch guide](../../README.md#slurm-setup). The Modal equivalent is
+`run_role_lora_cold_psro5_h200x4.sh`. Historical results are in
+[EXPERIMENTS.md](../../EXPERIMENTS.md).
 
 ## Setup
 
@@ -19,6 +22,8 @@ git -C "$SSP_ROOT/upstream" checkout 0c56e503e8ae1b1b0fcd2214c92ea31fef1cb123
 
 python scripts/slurm/prepare_sources.py     # -> $SSP_ROOT/work  (patched tree)
 python scripts/slurm/prepare_sft_data.py    # -> $SSP_ROOT/sft_data
+python scripts/slurm/patch_defender_cot.py
+python scripts/slurm/patch_offtopic_labels.py
 
 # Base and judge weights into $SSP_ROOT/hf (HF_HOME layout):
 #   mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated
@@ -58,6 +63,11 @@ must sum below 1.0. Working split on 4xH200-141GB with the judge colocated:
 | frozen opponent | 0.26 | `--fixed_opponent_vllm_gpu_memory_utilization` |
 | ZeRO-3 actor | rest | needs ~40G with gradient checkpointing |
 
+This measured layout predates the optional off-topic verifier. That service
+defaults to another 0.24 of GPU 0; account for it separately or use
+`OFFTOPIC_ENABLE=0` for a run without its verdict. The fractions above are not
+a validated combined budget for both judges plus training.
+
 Two failure modes follow from getting this wrong: an engine that profiles zero
 KV blocks (`No available memory for the cache blocks`), or a `torch.OutOfMemory`
 once the actor starts. Neither is fixed by raising a single fraction.
@@ -95,4 +105,22 @@ cheap memory.
   after 12 retries. Its `--gpu_memory_utilization` must stay at 0.13 for the
   same reason: 0.12 leaves 0.74G of KV against the 1.0G one 8192-token request
   needs, and the judge dies at startup while its parent process lives on, so the
-  phase hangs in the health-check loop rather than failing fast.
+  phase waits for its health-check limit. The launcher now fails the phase if
+  the judge never becomes ready, prints the log tail, and cleans up its process
+  group. `JUDGE_STARTUP_ATTEMPTS` controls this limit (default 90 probes).
+
+The optional off-topic verifier is stopped if startup fails and is also cleaned
+up when training exits. Its requests use a 3-second connect timeout and
+`OFFTOPIC_TIMEOUT_SECONDS` (default 15) for reads, without retries. Reapply
+`patch_offtopic_labels.py` to upgrade an already-prepared upstream tree.
+
+## Unified binary topic reward
+
+For the new shared training/matrix reward, set `GAME_REWARD_MODE=shared_binary`
+and `TOPIC_PENALTY=3`, and configure the external topic API as described in the
+[main README](../../README.md#shared-training--psro-reward-and-external-binary-topic-judge).
+Re-run `prepare_sources.py`, `patch_defender_cot.py`, and `patch_offtopic_labels.py`
+before training, and use a new run suffix. The local `OFFTOPIC_ENABLE` switch
+does not control this external judge. The optimizer remains REINFORCE advantage.
+For the first Slurm API smoke run set `DRIVER_MAX_ATTEMPTS=1` so a bad API
+configuration is not retried by the outer job wrapper.

@@ -6,6 +6,16 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 
+def run_contract_settings(contract: Mapping[str, Any]) -> dict[str, Any]:
+    """Compare run settings independently of legacy source-code fingerprints.
+
+    Source hashes are provenance, not a prerequisite for starting or resuming.
+    Keep all scientific settings (including the reward version) in the contract.
+    Checkpoint and dataset identities are verified separately by the coordinator.
+    """
+    return {key: value for key, value in contract.items() if key != "implementation_sha256"}
+
+
 def population_labels(role: str, learned: int) -> list[str]:
     if role not in {"attacker", "defender"}:
         raise ValueError(f"invalid role: {role!r}")

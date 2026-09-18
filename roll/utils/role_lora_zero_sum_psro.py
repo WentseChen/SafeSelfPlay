@@ -20,10 +20,17 @@ from roll.utils.upstream_v2_payoff import (
     mean_ci95,
 )
 from .offtopic_verifier import apply_offtopic_penalty
+from .shared_game_reward import (
+    InvalidGame, SHARED_GAME_REWARD_VERSION, compute_shared_game_reward,
+    shared_game_reward_enabled, shared_game_reward_bounds,
+)
 
 
-ZERO_SUM_REWARD_VERSION = "role-lora-psro-terminal-projection-v4"
-ZERO_SUM_REWARD_BOUNDS = (-1.0, 1.0)
+ZERO_SUM_REWARD_VERSION = (
+    SHARED_GAME_REWARD_VERSION if shared_game_reward_enabled()
+    else "role-lora-psro-terminal-projection-v4"
+)
+ZERO_SUM_REWARD_BOUNDS = shared_game_reward_bounds() if shared_game_reward_enabled() else (-1.0, 1.0)
 TERMINAL_GENERAL_SUM_BOUNDS = (-2.0, 2.0)
 
 
@@ -49,6 +56,12 @@ def compute_zero_sum_psro_reward(
     the task label cannot become an attacker shortcut. Other terminal outcomes
     use the unchanged reward projection.
     """
+
+    if shared_game_reward_enabled():
+        try:
+            return compute_shared_game_reward(prompt_type=prompt_type, labels=labels)
+        except InvalidGame as exc:
+            raise ZeroSumEpisodeDrop(exc.reason) from exc
 
     if prompt_type not in {"generated_harmful", "generated_benign"}:
         raise ValueError(
@@ -259,9 +272,10 @@ def analyze_zero_sum_convergence(
                 f"index {index}"
             )
         value = float(row["attacker_zero_sum_reward"])
-        if not ZERO_SUM_REWARD_BOUNDS[0] <= value <= ZERO_SUM_REWARD_BOUNDS[1]:
+        bounds = shared_game_reward_bounds() if shared_game_reward_enabled() else ZERO_SUM_REWARD_BOUNDS
+        if not bounds[0] <= value <= bounds[1]:
             raise ValueError(
-                f"attacker zero-sum reward is outside [-1, 1] at index {index}"
+                f"attacker zero-sum reward is outside {bounds} at index {index}"
             )
         if float(row["defender_zero_sum_reward"]) != -value:
             raise ValueError(f"non-zero-sum episode at index {index}")
@@ -311,8 +325,8 @@ def analyze_zero_sum_convergence(
             name: bounded_empirical_bernstein_interval(
                 values,
                 alpha=per_interval_alpha,
-                lower_bound=ZERO_SUM_REWARD_BOUNDS[0],
-                upper_bound=ZERO_SUM_REWARD_BOUNDS[1],
+                lower_bound=bounds[0],
+                upper_bound=bounds[1],
             )
             for name, values in values_by_series.items()
         }
@@ -353,7 +367,7 @@ def analyze_zero_sum_convergence(
     return {
         "reward_version": ZERO_SUM_REWARD_VERSION,
         "payoff_orientation": "attacker/maximizer",
-        "reward_bounds": list(ZERO_SUM_REWARD_BOUNDS),
+        "reward_bounds": list(bounds),
         "prompt_distribution": "exactly 50/50 harmful/benign interleaved",
         "criterion": {
             "confidence_method": (

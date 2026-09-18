@@ -42,6 +42,7 @@ from roll.utils.role_lora_cold_psro import (
     oracle_start_label,
     opponent_pool as build_psro_opponent_pool,
     payoff_matrix as build_psro_payoff_matrix,
+    run_contract_settings,
 )
 from roll.utils.role_lora_zero_sum_psro import (
     ZERO_SUM_REWARD_VERSION,
@@ -58,6 +59,7 @@ from roll.utils.role_lora_naive_selfplay import (
     build_latest_opponent_schedule,
 )
 from roll.utils.upstream_v2_payoff import mean_ci95
+from roll.utils.shared_game_reward import shared_game_reward_enabled, shared_game_reward_contract
 
 
 _evaluate_upstream_v2_raw_payoff_cell = (
@@ -148,12 +150,10 @@ def _psro_implementation_hashes() -> dict[str, str]:
         / "modal_upstream_selfredteam_role_lora_v2.py",
         "payoff": LOCAL_REPOSITORY / "modal_upstream_v2_payoff.py",
         "schedule": Path("/roll/roll/utils/role_lora_cold_psro.py"),
-        "reward": Path("/roll/roll/utils/role_lora_zero_sum_psro.py"),
     }
     local_roll = LOCAL_REPOSITORY / "roll" / "utils"
     for key, filename in (
         ("schedule", "role_lora_cold_psro.py"),
-        ("reward", "role_lora_zero_sum_psro.py"),
     ):
         if not candidates[key].is_file():
             candidates[key] = local_roll / filename
@@ -1485,12 +1485,12 @@ def _contracts_match_for_generation_extension(
 ) -> bool:
     prior_invariant = {
         key: value
-        for key, value in prior.items()
+        for key, value in run_contract_settings(prior).items()
         if key not in _EXTENSIBLE_CONTRACT_FIELDS
     }
     requested_invariant = {
         key: value
-        for key, value in requested.items()
+        for key, value in run_contract_settings(requested).items()
         if key not in _EXTENSIBLE_CONTRACT_FIELDS
     }
     return prior_invariant == requested_invariant
@@ -1636,6 +1636,11 @@ def advance_cold_psro(
             f"D1-D{generations}"
         ),
     }
+    if shared_game_reward_enabled():
+        contract["shared_game_reward"] = shared_game_reward_contract()
+        contract["training_reward"] = ZERO_SUM_REWARD_VERSION
+        contract["training_attacker_objective"] = "shared zero-sum terminal utility"
+        contract["training_label_drift_policy"] = "same as matrix: drop benign-to-harmful"
     output_vol.reload()
     prior = _read_json(state_path) if state_path.is_file() else None
     state: dict[str, Any] = prior or {
@@ -1657,7 +1662,7 @@ def advance_cold_psro(
         prior_contract = prior.get("contract")
         if not isinstance(prior_contract, dict):
             raise RuntimeError("existing PSRO state has no valid contract")
-        if prior_contract != contract:
+        if run_contract_settings(prior_contract) != run_contract_settings(contract):
             prior_generations = int(prior_contract.get("generations", 0))
             if (
                 prior.get("completed") is True
@@ -1692,6 +1697,7 @@ def advance_cold_psro(
                 )
         elif state.get("completed") is True:
             return state
+    state["last_implementation_sha256"] = contract["implementation_sha256"]
     population = state["population"]
     for label, record in population.items():
         if label in {"A0", "D0"}:

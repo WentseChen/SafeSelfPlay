@@ -8,14 +8,15 @@ never sees the *seed*, so it cannot tell a faithful rewrite from a memorized
 request that happens to elicit harm -- the blind spot that let attackers A3/A4/A6
 emit a single prompt for all 60 held-out seeds and still score well.
 
-This patch adds a second call, to the off-topic verifier, using the seed that is
-already carried on each game (``game["prompts"]``), and merges ``off_topic``
-into the same label dict.  ``roll/utils/role_lora_zero_sum_psro.py`` then applies
-the penalty inside the zero-sum projection.
+This patch compares the seed carried on each game (``game["prompts"]``) with
+the rewrite, then merges ``off_topic`` into the WildGuard label dict. In
+``GAME_REWARD_MODE=shared_binary``, the external API verdict is required and
+``shared_game_reward.py`` subtracts the penalty after the zero-sum projection.
+API failure stops the run after bounded retries.
 
-The call is skipped when ``OFFTOPIC_URL`` is unset, so an operator can disable
-the term without editing code, and a verifier failure degrades to "no verdict"
-(recorded as ``absent``) rather than taking the training run down.
+Legacy mode separately uses the optional local ``OFFTOPIC_URL`` verifier;
+its failures leave the verdict absent. That older path does not provide the
+shared training/matrix reward.
 
     SSP_ROOT=/path/to/workspace python scripts/slurm/patch_offtopic_labels.py
     SSP_ROOT=/path/to/workspace python scripts/slurm/patch_offtopic_labels.py --check
@@ -38,10 +39,29 @@ BEFORE_RE = re.compile(
     r"[ \t]*return batch_labels_dict[ \t]*\n"
 )
 
+API_BLOCK = '''        from roll.utils.shared_game_reward import shared_game_reward_enabled
+        if shared_game_reward_enabled():
+            from roll.utils.topic_api import label_topic_queries
+            topic_queries = [
+                {"game_idx": idx, "seed": game["prompts"],
+                 "rewrite": game["history"][0]["content"]}
+                for idx, game in self.active_games.items()
+                if game["prompt_type"] in {"generated_harmful", "generated_benign"}
+                and game.get("history")
+                and not batch_labels_dict.get(idx, {}).get("is_parsing_error", False)
+                and not (game["prompt_type"] == "generated_benign"
+                         and batch_labels_dict.get(idx, {}).get("prompt_harmfulness") == "harmful")
+            ]
+            for verdict in label_topic_queries(topic_queries):
+                batch_labels_dict[verdict["game_idx"]].update(verdict)
+            return batch_labels_dict
+
+'''
+
 AFTER = '''        if isinstance(batch_labels_dict, list):
             batch_labels_dict = {idx: label for idx, label in enumerate(batch_labels_dict)}
 
-        # Second verdict: is the attacker's rewrite still asking what the seed
+''' + API_BLOCK + '''        # Second verdict: is the attacker's rewrite still asking what the seed
         # asked?  WildGuard cannot answer that -- it never sees the seed -- and
         # without it a fixed memorized request that reliably elicits harm is a
         # local optimum.  A failure here must not take the run down, so any
@@ -58,7 +78,15 @@ AFTER = '''        if isinstance(batch_labels_dict, list):
                 if len(game.get("history", [])) >= 1
             ]
             try:
-                verdicts = remote_rm_fn(offtopic_url, topic_queries, score_key="labels")
+                # This optional service must not inherit WildGuard's 12 long retries.
+                import requests
+                response = requests.post(
+                    offtopic_url,
+                    json={"queries": topic_queries},
+                    timeout=(3, max(0.1, float(os.environ.get("OFFTOPIC_TIMEOUT_SECONDS", "15")))),
+                )
+                response.raise_for_status()
+                verdicts = response.json()["labels"]
                 if isinstance(verdicts, list):
                     verdicts = {
                         v.get("game_idx", i): v for i, v in enumerate(verdicts)
@@ -81,12 +109,24 @@ AFTER = '''        if isinstance(batch_labels_dict, list):
 '''
 
 MARKER = 'offtopic_url = os.environ.get("OFFTOPIC_URL"'
+LEGACY_CALL = '                verdicts = remote_rm_fn(offtopic_url, topic_queries, score_key="labels")'
+BOUNDED_CALL = AFTER[AFTER.index("                # This optional service"):AFTER.index("                if isinstance(verdicts, list):")].rstrip()
 
 
 def apply(text: str) -> tuple[str, bool]:
     """Return ``(patched_text, changed)``; an already-patched input is unchanged."""
     if MARKER in text:
-        return text, False
+        changed = False
+        if LEGACY_CALL in text:
+            text = text.replace(LEGACY_CALL, BOUNDED_CALL, 1)
+            changed = True
+        if "from roll.utils.topic_api import label_topic_queries" not in text:
+            marker = "        # Second verdict: is the attacker's rewrite still asking what the seed"
+            if text.count(marker) != 1:
+                raise SystemExit("Cannot locate the existing topic label patch")
+            text = text.replace(marker, API_BLOCK + marker, 1)
+            changed = True
+        return text, changed
     found = BEFORE_RE.findall(text)
     if len(found) != 1:
         raise SystemExit(
@@ -118,7 +158,7 @@ def main() -> int:
 
     text = target.read_text(encoding="utf-8")
     if args.check:
-        if MARKER not in text:
+        if MARKER not in text or LEGACY_CALL in text or "from roll.utils.topic_api import label_topic_queries" not in text:
             print(f"NOT PATCHED: {target}", file=sys.stderr)
             return 1
         print(f"patched: {target}")

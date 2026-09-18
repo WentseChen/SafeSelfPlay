@@ -157,8 +157,8 @@ export RACE_CELLS RACE_PILOT_EPISODES RACE_M_ROW RACE_M_COL RACE_TAU
 [ -n "${DRIVER_MAX_ATTEMPTS:-}" ] && export DRIVER_MAX_ATTEMPTS
 
 if [ -z "${WANDB_API_KEY:-}" ]; then
-  echo "WANDB_API_KEY is not set; the phases would run with W&B disabled" >&2
-  exit 1
+  echo "WANDB_API_KEY is not set; running with W&B disabled" >&2
+  export WANDB_MODE=disabled
 fi
 SBATCH_ARGS=()
 # DEPENDENCY chains the stages (cold train -> cold eval -> hot train -> hot eval)

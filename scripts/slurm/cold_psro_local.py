@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import shutil
@@ -40,6 +41,8 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import cold_psro_common as common  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from roll.utils.shared_game_reward import shared_game_reward_enabled, shared_game_reward_contract, SHARED_GAME_REWARD_VERSION
 
 SLURM_DIR = Path(__file__).resolve().parent
 ROLE_PHASE = SLURM_DIR / "role_phase.sh"
@@ -252,6 +255,43 @@ def _build_criterion(role: str):
     )
 
 
+def early_stop_configuration() -> dict[str, Any]:
+    return {role: criterion.configuration() if criterion else None
+            for role in ("attacker", "defender")
+            for criterion in [_build_criterion(role)]}
+
+
+def _checkpoint_ready(path: Path) -> bool:
+    """Wait for complete adapter contents, not just mkdir during a save."""
+    try:
+        json.loads((path / "adapter_config.json").read_text())
+        weights = path / "adapter_model.safetensors"
+        if weights.is_file():
+            from safetensors import safe_open
+            with safe_open(str(weights), framework="numpy") as adapter:
+                return bool(list(adapter.keys()))
+        import zipfile
+        with zipfile.ZipFile(path / "adapter_model.bin") as archive:
+            return bool(archive.namelist()) and archive.testzip() is None
+    except Exception:
+        # safetensors raises its own extension exception for incomplete writes.
+        return False
+
+
+def _terminate_training(process) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+        process.wait(timeout=180)
+    except (ProcessLookupError, subprocess.TimeoutExpired):
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=30)
+
+
 def _supervise_training(environment, training_log: Path, criterion, ckpt_dir: Path):
     """Run role_phase.sh, tail its log, and stop the run when the criterion fires.
 
@@ -298,28 +338,26 @@ def _supervise_training(environment, training_log: Path, criterion, ckpt_dir: Pa
                     continue
                 step, values = got
                 criterion.observe(step, values)
-                fired = (criterion.streak >= criterion.patience
-                         and step >= criterion.min_step)
-                if (fired or criterion.collapsed) and stop_step is None:
+                if (criterion.triggered or criterion.collapsed) and stop_step is None:
                     stop_step = step
-                    criterion.triggered = not criterion.collapsed
                     break
         if stop_step is None:
             return process.wait(), "ran the full budget"
         # let the checkpoint at the stopping step land before killing the tree
         deadline = time.time() + float(os.environ.get("EARLY_STOP_CKPT_WAIT", "900"))
         target = ckpt_dir / f"global_step{stop_step}_hf"
-        while time.time() < deadline and not target.is_dir() and process.poll() is None:
+        while time.time() < deadline and not _checkpoint_ready(target) and process.poll() is None:
             time.sleep(10)
-        try:
-            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-            process.wait(timeout=180)
-        except Exception:
-            try: os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-            except Exception: pass
+        if not _checkpoint_ready(target):
+            _terminate_training(process)
+            return 1, f"early stop at step {stop_step}, but checkpoint is incomplete: {target}"
+        if process.poll() not in {None, 0}:
+            return process.returncode, f"trainer failed while saving step {stop_step}"
+        _terminate_training(process)
         kind = "COLLAPSE" if criterion.collapsed else "converged"
-        return 0, f"{kind} at step {stop_step} ({criterion.reason or criterion.mode})"
+        return (2 if criterion.collapsed else 0), f"{kind} at step {stop_step} ({criterion.reason or criterion.mode})"
     finally:
+        _terminate_training(process)
         handle.close()
 
 
@@ -349,6 +387,10 @@ def make_local_oracle_trainer(psro: Any, cfg: Config):
         lr_warmup_ratio: float,
         training_seed: int,
         wandb_identity: str,
+        cold_start: bool | None = None,
+        role_start_label: str | None = None,
+        role_start_adapter: str | None = None,
+        role_start_sha256: str | None = None,
     ) -> dict[str, Any]:
         expected_prefix = "A" if role == "attacker" else "D"
         if not re.fullmatch(rf"{expected_prefix}[1-9][0-9]*", target):
@@ -366,7 +408,8 @@ def make_local_oracle_trainer(psro: Any, cfg: Config):
         # continues the previous same-role adapter, and only the first
         # generation of each role starts from base. The opponent rule, the
         # payoff matrix and the meta-game solve are untouched.
-        role_start_adapter: str | None = None
+        requested_start = role_start_adapter
+        role_start_adapter = None
         generation = int(target[1:])
         if cfg.init_mode == "hot" and generation > 1:
             parent = f"{target[0]}{generation - 1}"
@@ -380,8 +423,26 @@ def make_local_oracle_trainer(psro: Any, cfg: Config):
                     f"missing hot-start adapter for {target}: {role_start_adapter}"
                 )
         expected_role_start = role_start_adapter or psro.BASE_MODEL
+        # The current coordinator supplies explicit initialization metadata;
+        # older local/hot callers derive it from cfg. Keep both call forms.
+        if cold_start is not None:
+            expected_cold = cfg.init_mode == "cold"
+            expected_label = f"{target[0]}{0 if expected_cold else generation - 1}"
+            if cold_start != expected_cold or role_start_label != expected_label:
+                raise RuntimeError(f"{target}: coordinator/local initialization mismatch")
+            if requested_start != role_start_adapter:
+                raise RuntimeError(f"{target}: coordinator/local start adapter mismatch")
+            actual_sha = (
+                psro._adapter_identity(Path(role_start_adapter))["adapter_sha256"]
+                if role_start_adapter else f"base:{psro.BASE_MODEL}"
+            )
+            if role_start_sha256 != actual_sha:
+                raise RuntimeError(f"{target}: role-start checkpoint identity changed")
 
-        if psro._adapter_checkpoint(checkpoint):
+        # An early-stopped oracle has a checkpoint below the step budget.
+        # Reuse its completed manifest if the coordinator was interrupted
+        # between the manifest write and population update.
+        if manifest_path.is_file():
             manifest = psro._read_json(manifest_path)
             if (
                 manifest.get("role_start") != expected_role_start
@@ -389,8 +450,11 @@ def make_local_oracle_trainer(psro: Any, cfg: Config):
                 or manifest.get("steps") != steps
             ):
                 raise RuntimeError(f"existing {target} checkpoint contract changed")
-            log(f"{target} already trained; reusing {checkpoint}")
-            return psro._adapter_identity(checkpoint)
+            recorded = Path(manifest.get("checkpoint", str(checkpoint)))
+            if recorded.parent != checkpoint.parent or not psro._adapter_checkpoint(recorded):
+                raise RuntimeError(f"completed {target} checkpoint is missing: {recorded}")
+            log(f"{target} already trained; reusing {recorded}")
+            return psro._adapter_identity(recorded)
 
         # A preempted attempt leaves a partial ckpt tree. gpu2 is the only node
         # available and its project QOS is preemptible by qos_radio_freq, so an
@@ -403,7 +467,18 @@ def make_local_oracle_trainer(psro: Any, cfg: Config):
         # not losing work to preemption. D7 was first trained across a seam and
         # came out anomalously weak, so a retrain that must be clean sets
         # PSRO_MIDRUN_RESUME=0 and restarts the oracle from step 0 instead.
-        allow_resume = os.environ.get("PSRO_MIDRUN_RESUME", "1") != "0"
+        # Match role_phase.sh's default. A base-KL run must restart a partial
+        # oracle from base; inheriting its adapter also changes the reference.
+        kl_coef = float(os.environ.get("INIT_KL_COEF") or "0.01")
+        if kl_coef > 0 and role_start_adapter:
+            raise RuntimeError(
+                f"{target}: INIT_KL_COEF={kl_coef} with a start adapter would "
+                "anchor KL to that adapter, not the base. Set INIT_KL_COEF=0 "
+                "for hot-start training."
+            )
+        allow_resume = os.environ.get(
+            "PSRO_MIDRUN_RESUME", "0" if kl_coef > 0 else "1"
+        ) != "0"
         resume_from, resume_step = None, 0
         if run_dir.exists():
             done = sorted(
@@ -413,6 +488,12 @@ def make_local_oracle_trainer(psro: Any, cfg: Config):
                 if m and psro._adapter_checkpoint(path)
             ) if allow_resume else []
             if done and done[-1][0] < steps:
+                if kl_coef > 0:
+                    raise RuntimeError(
+                        f"{target}: base-KL training cannot resume a partial "
+                        "adapter; set PSRO_MIDRUN_RESUME=0 or INIT_KL_COEF=0. "
+                        "The existing checkpoint has been left in place."
+                    )
                 resume_step, newest = done[-1]
                 keep = run_dir.with_name(f"{target}.segment_{resume_step}")
                 if keep.exists():
@@ -441,20 +522,10 @@ def make_local_oracle_trainer(psro: Any, cfg: Config):
             # resumed segment is global_step{train_steps}, not global_step{steps}.
             checkpoint = run_dir / "ckpt" / f"global_step{train_steps}_hf"
 
-        # The reference model for the KL penalty is built from
-        # role_start_adapter (see the patch in the trainer), so it equals the
-        # BASE model only when that is unset. A hot start or a resumed segment
-        # would silently anchor the penalty to the round start instead -- the
-        # opposite of what an anchor to base means -- so refuse rather than
-        # train something mislabelled.
-        kl_coef = float(os.environ.get("INIT_KL_COEF", "0") or 0)
-        if kl_coef > 0 and role_start_adapter:
-            raise RuntimeError(
-                f"{target}: INIT_KL_COEF={kl_coef} anchors the reverse-KL penalty "
-                f"to role_start_adapter ({role_start_adapter}), not to the base "
-                "model. Set PSRO_MIDRUN_RESUME=0 (cold) or drop the penalty."
-            )
-
+        criterion = _build_criterion(role)
+        effective_save_steps = math.gcd(save_steps, train_steps)
+        if criterion is not None:
+            effective_save_steps = math.gcd(effective_save_steps, criterion.window)
         environment = cfg.base_env()
         environment.update(
             {
@@ -474,13 +545,13 @@ def make_local_oracle_trainer(psro: Any, cfg: Config):
                 "LR": repr(float(learning_rate)),
                 "SFT_STOP": str(sft_stop_after_step),
                 "SFT_BATCHES_PER_STEP": str(sft_batches_per_step),
-                "SAVE_STEPS": str(save_steps),
+                "SAVE_STEPS": str(effective_save_steps),
                 # role_phase.sh keeps only ONE checkpoint by default, which
                 # leaves held-out selection nothing to choose between. Retain
                 # every checkpoint this oracle writes.
                 "MAX_CKPT_NUM": os.environ.get(
                     "MAX_CKPT_NUM",
-                    str(max(steps // max(save_steps, 1) + 2, 4)),
+                    str(max(steps // effective_save_steps + 2, 4)),
                 ),
                 "ACTOR_LR_SCHEDULER": actor_lr_scheduler,
                 "LR_WARMUP_RATIO": repr(float(lr_warmup_ratio)),
@@ -530,6 +601,9 @@ def make_local_oracle_trainer(psro: Any, cfg: Config):
         )
         if role_start_adapter:
             environment["START_ADAPTER"] = role_start_adapter
+        else:
+            environment.pop("START_ADAPTER", None)
+        environment.pop("OPPONENT", None)
         environment.pop("CUDA_VISIBLE_DEVICES", None)
 
         training_log = run_dir / "training.log"
@@ -543,7 +617,7 @@ def make_local_oracle_trainer(psro: Any, cfg: Config):
         )
         log(f"  wandb run name: {wandb_identity}")
         log(f"  log: {training_log}")
-        criterion = _build_criterion(role)
+        note = "ran the full budget"
         if criterion is None:
             with training_log.open("ab") as handle:
                 completed = subprocess.run(
@@ -557,24 +631,21 @@ def make_local_oracle_trainer(psro: Any, cfg: Config):
                 environment, training_log, criterion, checkpoint.parent
             )
             log(f"  early stop: {note}")
+        stop_record = {"enabled": criterion is not None, "outcome": note,
+                       "returncode": returncode,
+                       **(criterion.report() if criterion else {})}
+        psro._write_json_atomic(run_dir / "early_stop.json", stop_record)
         if returncode != 0:
             raise RuntimeError(
                 f"{target} training failed rc={returncode}; "
                 f"see {training_log}"
             )
-        # A plateau stop ends training before `steps`, so the last checkpoint
-        # is the stopping step and not the budget. Resolve to the highest step
-        # actually written; held-out selection then chooses among all of them.
-        if not psro._adapter_checkpoint(checkpoint):
-            written = sorted(
-                (int(match.group(1)), path)
-                for path in checkpoint.parent.glob("global_step*_hf")
-                for match in [re.fullmatch(r"global_step(\d+)_hf", path.name)]
-                if match and psro._adapter_checkpoint(path)
-            )
-            if written:
-                checkpoint = written[-1][1]
-                log(f"  stopped early; final checkpoint is {checkpoint.name}")
+        # Use the triggering checkpoint, even if training advanced another
+        # step before the monitor signalled it to stop.
+        if criterion is not None and criterion.triggered:
+            stopping_step = criterion.measurements[-1].window_end
+            checkpoint = checkpoint.parent / f"global_step{stopping_step}_hf"
+            log(f"  stopped early; final checkpoint is {checkpoint.name}")
         if not psro._adapter_checkpoint(checkpoint):
             raise RuntimeError(f"{target} finished without {checkpoint}")
 
@@ -586,9 +657,10 @@ def make_local_oracle_trainer(psro: Any, cfg: Config):
             {
                 "method": "Self-RedTeam role-specific PEFT LoRA v2 (Slurm port)",
                 "role": role,
-                "ppo_reward_type": "general_sum",
-                "strict_zero_sum_ppo_reward": False,
-                "label_drift_training_policy": psro.TRAINING_LABEL_DRIFT_POLICY,
+                "ppo_reward_type": SHARED_GAME_REWARD_VERSION if shared_game_reward_enabled() else "general_sum",
+                "strict_zero_sum_ppo_reward": shared_game_reward_enabled(),
+                "shared_game_reward": shared_game_reward_contract() if shared_game_reward_enabled() else None,
+                "label_drift_training_policy": "drop benign-to-harmful as in matrix" if shared_game_reward_enabled() else psro.TRAINING_LABEL_DRIFT_POLICY,
                 "prompt_label_balance": (
                     "deterministic exact 50/50 harmful/benign finite prefix"
                 ),
@@ -604,26 +676,32 @@ def make_local_oracle_trainer(psro: Any, cfg: Config):
                     "opponent action per two-turn episode"
                 ),
                 "steps": steps,
+                "save_steps": save_steps,
+                "effective_save_steps": effective_save_steps,
+                "early_stopping": stop_record,
                 "resumed_from_step": resume_step or None,
                 "resumed_from_checkpoint": resume_from,
                 # Cumulative across resume seams: the trainer's local step
                 # count restarts at zero in each segment.
                 "steps_completed": resume_step
                 + int(re.fullmatch(r"global_step(\d+)_hf", checkpoint.name).group(1)),
-                "rollout_batch_size": 128,
-                "train_batch_size": 32,
+                "rollout_batch_size": int(environment.get("ROLLOUT_BATCH", "128")),
+                "train_batch_size": int(environment.get("TRAIN_BATCH", "32")),
                 "lora_rank": lora_rank,
                 "lora_alpha": lora_alpha,
                 "learning_rate": learning_rate,
                 "actor_lr_scheduler": actor_lr_scheduler,
                 "lr_warmup_ratio": lr_warmup_ratio,
                 "seed": training_seed,
-                "kl_penalty": 0.0,
+                "kl_penalty": kl_coef,
                 "reference_kl_monitored": True,
                 "sft_stop_after_step": sft_stop_after_step,
                 "sft_batches_per_step": sft_batches_per_step,
                 "wandb_identity": run_name,
                 "wandb_run_id": hashlib.sha1(run_name.encode()).hexdigest()[:8],
+                "wandb_entity": environment.get("WANDB_ENTITY", ""),
+                "wandb_project": environment.get("WANDB_PROJECT", "self-play"),
+                "wandb_group": environment.get("WANDB_GROUP", "upstream-selfredteam-role-lora-v2"),
                 "checkpoint_retention": "all_hf_checkpoints_for_selection",
                 "checkpoint": str(checkpoint),
                 "executor": "slurm/role_phase.sh",
@@ -639,6 +717,34 @@ def make_local_oracle_trainer(psro: Any, cfg: Config):
         return psro._adapter_identity(selected)
 
     return train_cold_psro_oracle
+
+
+def finalize_local_training(psro: Any, root: Path, state: dict[str, Any]) -> None:
+    """Save the final meta-game without claiming external benchmarks ran."""
+    generations = int(state["contract"]["generations"])
+    attackers, defenders, matrix = psro.build_psro_payoff_matrix(
+        state["population"], state["cells"]
+    )
+    if len(attackers) != generations + 1 or len(defenders) != generations + 1:
+        raise RuntimeError("Cannot finalize an incomplete PSRO population")
+    solution = psro.solve_zero_sum_meta_game(matrix)
+    snapshot = psro._persist_matrix_snapshot(
+        root, state, snapshot_name=f"final_g{generations}",
+        attackers=attackers, defenders=defenders, matrix=matrix, solution=solution,
+    )
+    latest = root / "matrices/final.json"
+    psro._write_json_atomic(latest, psro._read_json(Path(snapshot["path"])))
+    state["matrix_snapshots"]["latest_final"] = {
+        "path": str(latest), "sha256": psro._sha256_file(latest),
+        "generation": generations, "immutable_snapshot": snapshot,
+    }
+    final = {"attackers": attackers, "defenders": defenders, "payoff": matrix,
+             "meta_solution": solution, "snapshot": snapshot}
+    state.setdefault("final_matrices", {})[str(generations)] = final
+    state.update(final_matrix=final, training_completed=True,
+                 stage="training_complete_evaluation_pending")
+    psro._persist_psro_inventory(root, state)
+    psro._write_json_atomic(root / "state.json", state)
 
 
 def _base_model_path(cfg) -> str:
@@ -972,10 +1078,14 @@ def main() -> int:
         # enough to select on afterwards.
         for key, env in (("steps_per_role", "STEPS_PER_ROLE"),
                          ("save_steps", "SAVE_STEPS_CONTRACT"),
+                         ("training_seed", "TRAINING_SEED"),
                          ("matrix_episodes", "MATRIX_EPISODES")):
             raw = os.environ.get(env)
             if raw:
                 advance_kwargs[key] = int(raw)
+        budget = advance_kwargs.get("steps_per_role", 100)
+        advance_kwargs["attacker_sft_stop_after_step"] = min(30, budget)
+        advance_kwargs["defender_sft_stop_after_step"] = min(10, budget)
     log(f"coordinator: {cfg.coordinator} (init_mode={cfg.init_mode})")
     log(f"run root: {cfg.run_root}")
     if contract:
@@ -1017,11 +1127,12 @@ def main() -> int:
             )
             log(f"next action: {action}")
             if action["kind"] == "evaluation" and cfg.stop_before_evaluation:
+                finalize_local_training(psro, cfg.run_root, state)
+                generations = int(state["contract"]["generations"])
                 log(
-                    "stopping before the official defender evaluations: they run "
-                    "through the selfredteam-official-eval workflow, which has no "
-                    "local port yet. A3-A5 and D3-D5 are trained and the 6x6 "
-                    "matrix is complete."
+                    f"All {generations} rounds and the {generations + 1}x"
+                    f"{generations + 1} matrix are complete; saved matrices/final.json. "
+                    "Official defender benchmarks are a separate evaluation job."
                 )
                 break
             if action["kind"] == "cell":
@@ -1050,7 +1161,8 @@ def main() -> int:
     final = psro._read_json(state_path)
     log(f"stage={final.get('stage')} completed={final.get('completed')}")
     log(f"population={sorted(final.get('population', {}))}")
-    log(f"cells={len(final.get('cells', {}))}/36")
+    matrix_size = (int(final["contract"]["generations"]) + 1) ** 2
+    log(f"cells={len(final.get('cells', {}))}/{matrix_size}")
     return 0
 
 

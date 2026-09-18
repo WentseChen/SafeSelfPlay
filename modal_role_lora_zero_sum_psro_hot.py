@@ -48,6 +48,7 @@ from roll.utils.role_lora_cold_psro import (
     next_action as next_cold_psro_action,
     opponent_pool as build_psro_opponent_pool,
     payoff_matrix as build_psro_payoff_matrix,
+    run_contract_settings,
 )
 from roll.utils.role_lora_zero_sum_psro import (
     ZERO_SUM_REWARD_VERSION,
@@ -154,12 +155,10 @@ def _psro_implementation_hashes() -> dict[str, str]:
         / "modal_upstream_selfredteam_role_lora_v2.py",
         "payoff": LOCAL_REPOSITORY / "modal_upstream_v2_payoff.py",
         "schedule": Path("/roll/roll/utils/role_lora_cold_psro.py"),
-        "reward": Path("/roll/roll/utils/role_lora_zero_sum_psro.py"),
     }
     local_roll = LOCAL_REPOSITORY / "roll" / "utils"
     for key, filename in (
         ("schedule", "role_lora_cold_psro.py"),
-        ("reward", "role_lora_zero_sum_psro.py"),
     ):
         if not candidates[key].is_file():
             candidates[key] = local_roll / filename
@@ -1456,12 +1455,12 @@ def _contracts_match_for_generation_extension(
 ) -> bool:
     prior_invariant = {
         key: value
-        for key, value in prior.items()
+        for key, value in run_contract_settings(prior).items()
         if key not in _EXTENSIBLE_CONTRACT_FIELDS
     }
     requested_invariant = {
         key: value
-        for key, value in requested.items()
+        for key, value in run_contract_settings(requested).items()
         if key not in _EXTENSIBLE_CONTRACT_FIELDS
     }
     return prior_invariant == requested_invariant
@@ -1622,7 +1621,7 @@ def advance_cold_psro(
         prior_contract = prior.get("contract")
         if not isinstance(prior_contract, dict):
             raise RuntimeError("existing PSRO state has no valid contract")
-        if prior_contract != contract:
+        if run_contract_settings(prior_contract) != run_contract_settings(contract):
             prior_generations = int(prior_contract.get("generations", 0))
             if (
                 prior.get("completed") is True
@@ -1657,6 +1656,7 @@ def advance_cold_psro(
                 )
         elif state.get("completed") is True:
             return state
+    state["last_implementation_sha256"] = contract["implementation_sha256"]
     population = state["population"]
     for label, record in population.items():
         if label in {"A0", "D0"}:

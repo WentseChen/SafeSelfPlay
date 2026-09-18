@@ -25,8 +25,6 @@ so no extra weights are needed:
         python scripts/slurm/serve_offtopic.py
 """
 
-from __future__ import annotations
-
 import logging
 import os
 import pathlib

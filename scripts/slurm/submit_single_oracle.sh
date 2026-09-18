@@ -43,8 +43,8 @@ LOGDIR=${LOGDIR:-$OUT_ROOT/logs}
 mkdir -p "$LOGDIR"
 
 if [ -z "${WANDB_API_KEY:-}" ]; then
-  echo "WANDB_API_KEY is not set; the phase would run with W&B disabled" >&2
-  exit 1
+  echo "WANDB_API_KEY is not set; running with W&B disabled" >&2
+  export WANDB_MODE=disabled
 fi
 
 START_ARG=""
