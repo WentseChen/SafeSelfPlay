@@ -378,10 +378,22 @@ def evaluate_full_checkpoint_vs_base(
         os.environ["HF_HUB_TOKEN"] = token
     elif any("wildguardtest" in task for task in FULL_DEFENDER_TASKS):
         # Only wildguardtest downloads a gated dataset (allenai/wildguardmix);
-        # the other seven tasks read files shipped inside the fork.
-        raise RuntimeError(
-            "wildguardtest needs HF_TOKEN for the gated allenai/wildguardmix"
+        # the other seven tasks read files shipped inside the fork. A token is
+        # needed to FETCH it, not to read it: once an earlier run has pulled it
+        # into HF_HOME the evaluation is fully offline, so accept a populated
+        # cache and force offline mode rather than failing on the missing token.
+        cache = Path(
+            os.environ.get("HF_HUB_CACHE")
+            or Path(os.environ.get("HF_HOME", "~/.cache/huggingface")).expanduser()
+            / "hub"
         )
+        snapshots = cache / "datasets--allenai--wildguardmix" / "snapshots"
+        if not any(snapshots.glob("*/*")):
+            raise RuntimeError(
+                "wildguardtest needs HF_TOKEN for the gated allenai/wildguardmix"
+            )
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["HF_DATASETS_OFFLINE"] = "1"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     fork_root = Path(UPSTREAM_REMOTE) / "eval/benchmarks/safety-eval-fork"
     os.environ["PYTHONPATH"] = ":".join(

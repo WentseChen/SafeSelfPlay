@@ -270,7 +270,13 @@ class AgenticConfig(PPOConfig):
         metadata={"help": "Smoke test only. Log each agent observation+response at INFO level."},
     )
     response_log_steps: int = field(
-        default=10,
+        # Each log writes a wandb.Table of full prompts and responses. Over the
+        # PSRO runs those tables reached 30k files / 3.5 GB and pushed the team
+        # entity past its 5 GB storage allowance, while the scalar charts (which
+        # live in the history store, not in run files) cost nothing. Default to
+        # off; set ROLL_RESPONSE_LOG_STEPS=10 to get the prompt tables back for
+        # a run that is actually being debugged.
+        default_factory=lambda: int(os.environ.get("ROLL_RESPONSE_LOG_STEPS", "0")),
         metadata={"help": "Log sample rollout responses to wandb every N steps (0 = disabled)."},
     )
     aux_sft_path: str = field(

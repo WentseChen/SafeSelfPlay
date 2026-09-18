@@ -44,7 +44,6 @@ import cold_psro_common as common  # noqa: E402
 SLURM_DIR = Path(__file__).resolve().parent
 ROLE_PHASE = SLURM_DIR / "role_phase.sh"
 CELL_WORKER = SLURM_DIR / "payoff_cell_worker.py"
-SELECT_CHECKPOINT = SLURM_DIR / "select_checkpoint.py"
 
 
 def log(message: str) -> None:
@@ -393,17 +392,68 @@ def make_local_oracle_trainer(psro: Any, cfg: Config):
             log(f"{target} already trained; reusing {checkpoint}")
             return psro._adapter_identity(checkpoint)
 
-        # A preempted attempt leaves a partial ckpt tree and a manifest that
-        # does not describe a finished role. Both are reproducible; drop them.
+        # A preempted attempt leaves a partial ckpt tree. gpu2 is the only node
+        # available and its project QOS is preemptible by qos_radio_freq, so an
+        # oracle that needs ~5h is unlikely to survive a single allocation.
+        # Rather than discard the work, continue from the newest retained
+        # checkpoint and train only the steps that remain. The seam costs the
+        # optimizer state and restarts the LR schedule, so a resumed oracle is
+        # not bit-identical to an uninterrupted one; the manifest records it.
+        # Mid-oracle resume trades a clean optimizer state and LR schedule for
+        # not losing work to preemption. D7 was first trained across a seam and
+        # came out anomalously weak, so a retrain that must be clean sets
+        # PSRO_MIDRUN_RESUME=0 and restarts the oracle from step 0 instead.
+        allow_resume = os.environ.get("PSRO_MIDRUN_RESUME", "1") != "0"
+        resume_from, resume_step = None, 0
         if run_dir.exists():
-            log(f"{target} restarting; clearing partial {run_dir}")
-            # rmtree races with NFS silly-rename (.nfsXXXX) when a preempted
-            # process still holds a log handle. Rename first -- that always
-            # succeeds -- then delete best-effort.
-            discarded = run_dir.with_name(f".discarded_{target}_{os.getpid()}")
-            run_dir.rename(discarded)
-            shutil.rmtree(discarded, ignore_errors=True)
+            done = sorted(
+                (int(m.group(1)), path)
+                for path in (run_dir / "ckpt").glob("global_step*_hf")
+                for m in [re.fullmatch(r"global_step(\d+)_hf", path.name)]
+                if m and psro._adapter_checkpoint(path)
+            ) if allow_resume else []
+            if done and done[-1][0] < steps:
+                resume_step, newest = done[-1]
+                keep = run_dir.with_name(f"{target}.segment_{resume_step}")
+                if keep.exists():
+                    shutil.rmtree(keep, ignore_errors=True)
+                run_dir.rename(keep)
+                resume_from = str(keep / "ckpt" / newest.name)
+                log(f"{target} resuming from step {resume_step} ({resume_from})")
+            else:
+                log(f"{target} restarting; clearing partial {run_dir}")
+                # rmtree races with NFS silly-rename (.nfsXXXX) when a preempted
+                # process still holds a log handle. Rename first -- that always
+                # succeeds -- then delete best-effort.
+                discarded = run_dir.with_name(f".discarded_{target}_{os.getpid()}")
+                run_dir.rename(discarded)
+                shutil.rmtree(discarded, ignore_errors=True)
         run_dir.mkdir(parents=True, exist_ok=True)
+        train_steps = steps
+        if resume_from:
+            # Only the TRAINER sees the resumed start and the reduced budget.
+            # expected_role_start and `steps` stay at their contract values so
+            # the manifest still describes the oracle as specified and the
+            # idempotence check on a later re-entry still matches.
+            role_start_adapter = resume_from
+            train_steps = steps - resume_step
+            # The trainer counts from zero again, so the budget checkpoint of a
+            # resumed segment is global_step{train_steps}, not global_step{steps}.
+            checkpoint = run_dir / "ckpt" / f"global_step{train_steps}_hf"
+
+        # The reference model for the KL penalty is built from
+        # role_start_adapter (see the patch in the trainer), so it equals the
+        # BASE model only when that is unset. A hot start or a resumed segment
+        # would silently anchor the penalty to the round start instead -- the
+        # opposite of what an anchor to base means -- so refuse rather than
+        # train something mislabelled.
+        kl_coef = float(os.environ.get("INIT_KL_COEF", "0") or 0)
+        if kl_coef > 0 and role_start_adapter:
+            raise RuntimeError(
+                f"{target}: INIT_KL_COEF={kl_coef} anchors the reverse-KL penalty "
+                f"to role_start_adapter ({role_start_adapter}), not to the base "
+                "model. Set PSRO_MIDRUN_RESUME=0 (cold) or drop the penalty."
+            )
 
         environment = cfg.base_env()
         environment.update(
@@ -417,7 +467,7 @@ def make_local_oracle_trainer(psro: Any, cfg: Config):
                 "ROLE": role,
                 "TAG": target,
                 "GEN": target[1:],
-                "STEPS": str(steps),
+                "STEPS": str(train_steps),
                 "GPUS": str(cfg.gpus),
                 "LORA_RANK": str(lora_rank),
                 "LORA_ALPHA": str(lora_alpha),
@@ -554,9 +604,12 @@ def make_local_oracle_trainer(psro: Any, cfg: Config):
                     "opponent action per two-turn episode"
                 ),
                 "steps": steps,
-                "steps_completed": int(
-                    re.fullmatch(r"global_step(\d+)_hf", checkpoint.name).group(1)
-                ),
+                "resumed_from_step": resume_step or None,
+                "resumed_from_checkpoint": resume_from,
+                # Cumulative across resume seams: the trainer's local step
+                # count restarts at zero in each segment.
+                "steps_completed": resume_step
+                + int(re.fullmatch(r"global_step(\d+)_hf", checkpoint.name).group(1)),
                 "rollout_batch_size": 128,
                 "train_batch_size": 32,
                 "lora_rank": lora_rank,
@@ -576,7 +629,13 @@ def make_local_oracle_trainer(psro: Any, cfg: Config):
                 "executor": "slurm/role_phase.sh",
             },
         )
-        selected = _select_checkpoint(cfg, role, checkpoint, normalized_pool, target)
+        # The oracle IS the final checkpoint of its training run. Held-out
+        # checkpoint selection was removed: the pipeline has no disjoint
+        # prompt set (training consumes rows 0-19,199 and the shipped
+        # "holdout" file is 1000/1000 inside it), and the selector's vLLM
+        # LoRA cache reused one lora_int_id across checkpoints, so every
+        # curve it produced was the first checkpoint measured repeatedly.
+        selected = checkpoint
         return psro._adapter_identity(selected)
 
     return train_cold_psro_oracle
@@ -592,57 +651,6 @@ def _base_model_path(cfg) -> str:
     if not snapshots:
         raise RuntimeError(f"no base-model snapshot under {hub}")
     return str(snapshots[0])
-
-
-def _select_checkpoint(cfg, role, final_checkpoint, normalized_pool, target):
-    """Return the checkpoint that scores best on held-out prompts.
-
-    Falls back to the final checkpoint on any failure: a selection problem must
-    never lose an oracle that trained successfully.
-    """
-    if os.environ.get("CKPT_SELECTION", "1") == "0":
-        return final_checkpoint
-    ckpt_dir = Path(final_checkpoint).parent
-    opponent = "base"
-    for entry in sorted(normalized_pool, key=lambda e: -float(e["probability"])):
-        if entry.get("path"):
-            opponent = entry["path"]
-            break
-    judge = Judge(cfg)
-    try:
-        url = judge.start()
-        command = [
-            cfg.python, str(SELECT_CHECKPOINT),
-            "--ckpt-dir", str(ckpt_dir), "--role", role, "--opponent", str(opponent),
-            "--work", str(cfg.work), "--base-model", _base_model_path(cfg),
-            "--judge-url", url,
-            "--n-prompts", os.environ.get("SELECT_N_PROMPTS", "64"),
-            "--offset", os.environ.get("SELECT_OFFSET", "6400"),
-            "--max-new-tokens", os.environ.get("GENERATE_MAX_LEN", "4096"),
-        ]
-        environment = cfg.base_env()
-        environment["CUDA_VISIBLE_DEVICES"] = "1"
-        completed = subprocess.run(command, cwd=str(cfg.work), env=environment)
-        if completed.returncode != 0:
-            log(f"  {target}: checkpoint selection failed rc={completed.returncode}; "
-                "keeping the final checkpoint")
-            return final_checkpoint
-        payload = json.loads((ckpt_dir.parent / "checkpoint_selection.json").read_text())
-        best = Path(payload["best_checkpoint"])
-        if not best.is_dir():
-            log(f"  {target}: selected {best} is missing; keeping the final checkpoint")
-            return final_checkpoint
-        log(f"  {target}: selected step {payload['best_step']} "
-            f"(final was {payload['final_step']})")
-        return best
-    except Exception as exc:                      # never lose a trained oracle
-        log(f"  {target}: checkpoint selection error ({exc}); keeping the final checkpoint")
-        return final_checkpoint
-    finally:
-        judge.stop()
-
-
-# --- payoff-cell prefetch ------------------------------------------------------
 
 
 def initialize_state(psro: Any, cfg: Config, advance_kwargs: dict[str, Any]) -> None:
@@ -748,7 +756,21 @@ def _racing_plan(
     pilot = int(os.environ.get("RACE_PILOT_EPISODES", "256"))
     plan: dict[str, int] = {}
     for a, d in pending:
-        plan[f"{a}__{d}"] = full if (a in keep_a and d in keep_d) else pilot
+        key = f"{a}__{d}"
+        # A cell that already finished on disk keeps the budget it was actually
+        # run with. The meta-strategy moves as the population grows, so a
+        # restart can recompute a different budget for a cell that is complete
+        # but not yet recorded in state.json; the coordinator then compares the
+        # new budget against the stored contract and rejects the cell as
+        # changed, which wedges the run on every retry.
+        done = cfg.run_root / "cells" / key / "summary.json"
+        if done.is_file():
+            try:
+                plan[key] = int(json.loads(done.read_text())["episodes"])
+                continue
+            except (ValueError, KeyError, OSError):
+                pass
+        plan[key] = full if (a in keep_a and d in keep_d) else pilot
     log(f"  racing: keeping attackers {sorted(keep_a)}, defenders {sorted(keep_d)}")
     log(f"  racing: {sum(v == full for v in plan.values())}/{len(plan)} cells at the "
         f"full {full}, the rest capped at the {pilot}-episode pilot")
@@ -927,11 +949,17 @@ def main() -> int:
         if contract
         else {"run_suffix": cfg.suffix}
     )
+    if args.generations:
+        # Also honoured on an EXISTING contract: that is the append-only
+        # generation extension. _advance_kwargs rebuilds every field from the
+        # stored contract, so without this the flag is silently dropped and the
+        # driver reports "run already complete" instead of extending. The
+        # coordinator still refuses a bump that is not a clean extension of a
+        # completed run, so this cannot corrupt a run in progress.
+        advance_kwargs["generations"] = args.generations
     if not contract:
         # A fresh run writes its contract on the first advance, so the two
         # behaviour changes have to be supplied here to be recorded in it.
-        if args.generations:
-            advance_kwargs["generations"] = args.generations
         objective = os.environ.get("ATTACKER_OBJECTIVE", "")
         if objective:
             advance_kwargs["training_attacker_objective"] = objective
@@ -965,6 +993,22 @@ def main() -> int:
                 continue
             state = psro._read_json(state_path)
             if state.get("completed") is True:
+                current = int(state["contract"]["generations"])
+                requested = int(args.generations or 0)
+                if requested > current:
+                    # Append-only generation extension. It has to go straight
+                    # through advance_cold_psro: next_action() below reads the
+                    # OLD generation count off the stored contract and would
+                    # just report the run finished again. The coordinator
+                    # rewrites the contract, clears `completed`, and keeps the
+                    # population and every measured cell; it refuses the bump
+                    # outright if the run is not a clean extension.
+                    log(f"extending generations {current} -> {requested}")
+                    psro.advance_cold_psro(**advance_kwargs)
+                    contract = psro._read_json(state_path)["contract"]
+                    advance_kwargs = psro._advance_kwargs(contract, cfg.suffix)
+                    actions += 1
+                    continue
                 log("run already complete")
                 break
             action = next_action(

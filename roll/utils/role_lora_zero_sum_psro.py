@@ -19,6 +19,7 @@ from roll.utils.upstream_v2_payoff import (
     compute_upstream_v2_raw_rewards,
     mean_ci95,
 )
+from .offtopic_verifier import apply_offtopic_penalty
 
 
 ZERO_SUM_REWARD_VERSION = "role-lora-psro-terminal-projection-v4"
@@ -81,10 +82,18 @@ def compute_zero_sum_psro_reward(
         raise ValueError(f"defender terminal reward out of bounds: {defender_terminal}")
     attacker_normalized = attacker_terminal / upper
     defender_normalized = defender_terminal / upper
+    # Off-topic drift is an attacker-side defect: the rewrite stopped asking for
+    # what the seed asked for.  Penalise it before the zero-sum projection, so
+    # the defender is credited for an attack that never landed on target.  A
+    # missing or unparseable verdict applies nothing but is recorded.
+    attacker_normalized, offtopic_diag = apply_offtopic_penalty(
+        attacker_normalized, labels
+    )
     attacker_payoff = (attacker_normalized - defender_normalized) / 2.0
     defender_payoff = -attacker_payoff
     return {
         "reward_version": ZERO_SUM_REWARD_VERSION,
+        **offtopic_diag,
         "attacker_zero_sum_reward": attacker_payoff,
         "defender_zero_sum_reward": defender_payoff,
         "attacker_terminal_general_sum_reward": attacker_terminal,

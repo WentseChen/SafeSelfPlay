@@ -98,7 +98,12 @@ def main() -> int:
                              min_tokens=1, skip_special_tokens=False,
                              include_stop_str_in_output=True, seed=int(s),
                              truncate_prompt_tokens=P.TRAIN_PROMPT_MAX_TOKENS) for s in seeds]
-        req = None if adapter in (None, "base") else LoRARequest(f"sel{lora_id}", lora_id, str(adapter))
+        # lora_int_id identifies the adapter in vLLM's cache. Reusing one id
+        # across checkpoints serves the FIRST checkpoint's weights for every
+        # later one, which silently turns the whole selection curve into one
+        # checkpoint measured repeatedly under different seeds.
+        req = (None if adapter in (None, "base")
+               else LoRARequest(f"sel{lora_id}", lora_id, str(adapter)))
         return [o.outputs[0].text for o in llm.generate(prompts, sp, lora_request=req)]
 
     # The untrained role is measured alongside the candidates as a control.  It
@@ -108,13 +113,14 @@ def main() -> int:
     # a base row there is no way to tell "saturated by step 20" from "nothing
     # transfers off the training prefix".
     results = {}
-    for step, path in [("base", None)] + steps:
+    for slot, (step, path) in enumerate([("base", None)] + steps):
         is_control = step == "base"
         role_adapter = None if is_control else path
         atk_adapter = role_adapter if args.role == "attacker" else args.opponent
         def_adapter = args.opponent if args.role == "attacker" else role_adapter
         attacks = gen([P._render_attacker_prompt(tok, s) for s in specs],
-                      [s["candidate_seed"] for s in specs], atk_adapter, 1)
+                      [s["candidate_seed"] for s in specs], atk_adapter,
+                      1000 + 2 * slot)
         parsed = [P.parse_prefilled_cot_completion(t) for t in attacks]
         texts = []
         for spec, raw, item in zip(specs, attacks, parsed):
@@ -127,7 +133,8 @@ def main() -> int:
         defenses = gen([P._render_defender_prompt(tok, s["attack"],
                                                   direct_base_defender=direct_base)
                         for s in dspec],
-                       [s["candidate_seed"] + 1_000_000_000 for s in dspec], def_adapter, 2)
+                       [s["candidate_seed"] + 1_000_000_000 for s in dspec],
+                       def_adapter, 1001 + 2 * slot)
         # A base defender is prompted WITHOUT the CoT wrapper and without the
         # assistant <think> prefix, so its reply carries no tags and the CoT
         # parser returns empty for all of it -- which scores every response as a

@@ -1,9 +1,9 @@
 {
   "schema_version": "hot-psro-coordinator-derivation-v1",
   "source": "modal_role_lora_zero_sum_psro.py",
-  "source_sha256": "87303efa04dd83aa3ea20ecd236d0746d12eac10064ddfb0a10a1a20813ffe4f",
+  "source_sha256": "0453aa30834fb1c6c6d20eb382b61d1cbab6a4b03e2891ba28e0fd3b5378f0ed",
   "derived": "modal_role_lora_zero_sum_psro_hot.py",
-  "derived_sha256": "12737920396a06945523ff4c3b8ac6809a9e9d39ff7a37e386998cbf60f371a6",
+  "derived_sha256": "35356d9f2702ef1b85d0a6c8c6bf27d778fc15e7771a56f6929056ef03788720",
   "substitutions": [
     {
       "from": "        \"init_mode\": \"cold\",\n        \"cold_definition\": (\n            \"every learned A_i and D_i starts from the same base with a new \"\n            f\"rank-{lora_rank} adapter and fresh optimizer\"\n        ),",
@@ -27,7 +27,7 @@
     "+# modal_role_lora_zero_sum_psro_hot.provenance.json for the exact",
     "+# substitutions. Regenerate rather than editing this file.",
     " #!/usr/bin/env python3",
-    "@@ -1492,6 +1499,7 @@",
+    "@@ -1535,6 +1542,7 @@",
     "         \"algorithm\": \"sequential_double_oracle_zero_sum_psro\",",
     "-        \"init_mode\": \"cold\",",
     "-        \"cold_definition\": (",
@@ -39,7 +39,7 @@
     "+            f\"rank-{lora_rank} adapter with a fresh optimizer; A1 and D1 open \"",
     "+            \"a new adapter on the base model\"",
     "         ),",
-    "@@ -1701,3 +1709,3 @@",
+    "@@ -1760,3 +1768,3 @@",
     "             training_seed=training_seed,",
     "-            wandb_identity=f\"role_lora_cold_psro__{suffix}__{target}\",",
     "+            wandb_identity=f\"role_lora_hot_psro__{suffix}__{target}\",",

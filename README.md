@@ -318,6 +318,151 @@ ASR (lower is better), harmful RTA (higher is better), and benign compliance
 This command does not cover the supplemental SR12 and SORRY-Bench results
 shown above.
 
+## Running the full pipeline on Slurm (start here)
+
+The Modal path in sections 1-4 is the original. On the Auton Slurm cluster the
+whole pipeline runs through `scripts/slurm/`, and this is the shortest route
+from a clean checkout to a finished PSRO run with evaluations.
+
+### Prerequisites, once per machine
+
+```bash
+# 1. Materialize the pinned upstream tree into $SSP_ROOT/work
+SSP_ROOT=/path/to/workspace python scripts/slurm/prepare_sources.py
+
+# 2. Apply the local patches to that tree (each is idempotent; --check verifies)
+SSP_ROOT=/path/to/workspace python scripts/slurm/patch_defender_cot.py
+SSP_ROOT=/path/to/workspace python scripts/slurm/patch_offtopic_labels.py
+
+# 3. Credentials, environment only - never written into a script or artifact
+export WANDB_API_KEY=...        # omit to train with W&B disabled
+export HF_TOKEN=...             # required: wildguardtest pulls a gated dataset
+```
+
+### Seed and launch a run
+
+```bash
+# 4. Seed the run contract (pins the sha256 of the five implementation modules)
+python scripts/slurm/seed_cold_psro_run.py --suffix my_run_20260918
+
+# 5. Launch. The driver is resumable: it reads state.json on every entry, so a
+#    preempted job is restarted by resubmitting the same script.
+SUFFIX=my_run_20260918 GENERATIONS=8 bash scripts/slurm/submit_cold_psro.sh
+```
+
+The driver alternates `train attacker A_i` -> `payoff cells for A_i` ->
+`train defender D_i` -> `payoff cells for D_i` until it reaches
+`GENERATIONS`, then solves the matrix. Everything it does is recorded in
+`$PSRO_ROOT/<suffix>/state.json`, and that file alone determines what runs next.
+
+### Evaluate
+
+```bash
+# Standard 11-metric suite for one or more defenders
+sbatch scripts/slurm/submit_eval.sh          # edit --defenders inside
+
+# Hard benchmarks: StrongREJECT x12 conditions, SORRY-Bench
+cd $WORKSPACE/hard_bench && sbatch h2_<arm>.sbatch && sbatch sbgen_gpu2.sbatch
+```
+
+### Knobs that change the science
+
+These are environment variables read by `scripts/slurm/role_phase.sh`. All have
+defaults that reproduce the current configuration; set them explicitly in a
+launcher when you want a different one.
+
+| variable | default | what it does |
+|---|---|---|
+| `INIT_KL_COEF` | `0.01` | Reverse-KL anchor `KL(pi \|\| pi_base)` added to the loss for **both** roles. `0` disables it. The reference is the base model whenever no start adapter is set; the driver refuses to run a penalty against a resume seam. |
+| `OFFTOPIC_ENABLE` | `1` | Runs the off-topic verifier and applies the penalty. `0` trains without it. |
+| `OFFTOPIC_PENALTY` | `0.5` | Penalty in normalized reward units when a rewrite is judged off-topic. Moves the matrix payoff by half this. |
+| `OFFTOPIC_PORT` / `OFFTOPIC_UTIL` | `JUDGE_PORT+200` / `0.24` | Verifier port and its share of GPU 0, which it shares with the WildGuard judge. |
+| `PSRO_MIDRUN_RESUME` | `1` | Resume a preempted oracle from its newest checkpoint. Set `0` for a run that must be seam-free: a seam loses optimizer state and restarts the LR schedule, which produced a visibly damaged D7 once. |
+| `RACE_CELLS` | `1` | Racing: non-equilibrium cells run a 256-episode pilot instead of the full budget. |
+
+### What each role sees
+
+This trips people up, so it is worth stating plainly. The defender is rendered
+with its CoT scaffold (`DEFENDER_INSTRUCTION_COT_PROMPT` plus the
+`"Let's think step by step.\n<think> "` prefill) in **defender training**, in
+**every payoff cell against a trained defender**, and in **every benchmark**
+(`chat_template: llama3_cot`). The single exception is a frozen opponent pool
+that still carries the adapter-less base model: the base never learned the
+template, and prefilling it is a jailbreak rather than a scaffold, so
+`role_phase.sh` clears `defender_cot_when_frozen` in that case. Attacker
+training used to drop the scaffold unconditionally, which meant it optimized
+against a rendering nothing else used; `patch_defender_cot.py` fixes that.
+
+### Reward
+
+The matrix payoff is `u_A = (norm_A - norm_D) / 2`, `u_D = -u_A`, computed in
+`roll/utils/role_lora_zero_sum_psro.py`. Two terms modify it:
+
+* a benign seed rewritten into a harmful prompt is **dropped**, so relabelling
+  the task cannot become an attacker shortcut;
+* a rewrite the verifier judges **off-topic** costs the attacker
+  `OFFTOPIC_PENALTY` before the projection. An absent or unparseable verdict
+  applies nothing but is recorded in the episode row, so a failing verifier is
+  visible rather than silently disabling the term.
+
+### Evaluating a checkpoint or a stage's Nash mixture
+
+A PSRO stage does not have "the" defender -- it has a mixed strategy. At
+generation 7 of the v6d run the defender mixture is D7 0.574 / D6 0.392 / D2
+0.034, and no single member behaves like the mixture. Both targets are
+first-class:
+
+```bash
+# one checkpoint
+python scripts/slurm/eval_policy_report.py --suffix <run> --policy D7
+
+# the stage's Nash mixture (latest solved generation, or pin one with @)
+python scripts/slurm/eval_policy_report.py --suffix <run> --policy nash:defender
+python scripts/slurm/eval_policy_report.py --suffix <run> --policy nash:attacker@5
+
+# which components would I have to evaluate to answer that?
+python scripts/slurm/eval_policy_report.py --suffix <run> --policy nash:attacker --plan
+```
+
+**Expectation mode (the default) costs no new GPU time.** A metric of a mixed
+strategy is the mixture-weighted mean of the component metrics,
+`E_{d~q}[m(d)] = sum_d q_d * m(d)`, which is exact -- there is no sampling noise
+-- and the components are usually already evaluated. The report prints each
+component beside the combined value so the mixture is never a black box:
+
+```
+metric                          D2        D6        D7     MIXTURE
+SR12 worst                  0.0787    0.1049    0.1126      0.1084
+OR-Bench benign comply      0.5747    0.5883    0.7703      0.6924
+```
+
+**Sample mode** is for when the artifact you want is *text* from the mixture
+rather than a number -- external attacker transfer, qualitative reads, anything
+judged per response. `roll.utils.eval_policy.assign_components` maps each
+evaluation item to one component by hashing `(seed, item index)`, so the
+assignment is reproducible, unaffected by parallel or partial evaluation, and
+identical across arms with the same item count and seed. Paired comparisons stay
+paired.
+
+The mixture is solved from the leading `(generation+1)` square submatrix of the
+recorded cells -- exactly the game the algorithm faced when it trained that
+stage's best response. A missing cell is an error rather than a silently
+different mixture, and components with negligible weight (below 1e-6) are
+dropped so no GPU time is spent on a 1e-15 entry.
+
+One limitation worth knowing: the standard 11-metric suite evaluates a *merged*
+defender, and a mixture cannot be merged into one set of weights. Expectation
+mode handles it correctly by combining per-component suite results, which is
+what the report does. Only sample mode would need multi-adapter serving, and it
+is not wired into that suite.
+
+### Changing a pinned module
+
+`state.json` pins the sha256 of five modules: the coordinator, trainer, payoff,
+schedule and reward. Editing any of them makes an in-flight run unresumable.
+Finish the run, or start a new suffix. `scripts/slurm/role_phase.sh` and the
+patch scripts are **not** pinned, so they can be changed between generations.
+
 ## 4. PSRO
 
 The commands below describe the repository's five-generation, 100-step
