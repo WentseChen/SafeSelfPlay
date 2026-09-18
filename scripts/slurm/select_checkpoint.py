@@ -168,6 +168,7 @@ def main() -> int:
             f"{'' if eligible else ' (below benign floor, ineligible)'}")
 
     control = results.pop("base", None)
+    lift = spread = 0.0
     if control is not None:
         spread = max(v["attack_success"] for v in results.values()) - \
                  min(v["attack_success"] for v in results.values())
@@ -178,14 +179,27 @@ def main() -> int:
             log("  WARNING: the trained lift over base does not exceed the spread "
                 "between checkpoints -- this selection is picking noise")
     usable = {k: v for k, v in results.items() if v["eligible"]} or results
-    best = max(usable, key=lambda k: usable[k]["score"])
     final = max(results)
+    noisy = control is not None and abs(lift) <= spread
+    if noisy and final in usable:
+        # Picking the argmax of a curve whose spread exceeds the trained effect
+        # just propagates whichever checkpoint got the luckiest draw. The final
+        # checkpoint is the deterministic choice and the one the run would have
+        # used with no selection at all, so prefer it and say so.
+        best = final
+        log(f"  falling back to the final checkpoint {final}: the curve is not "
+            f"separable at n={args.n_prompts} (SE about "
+            f"{(0.25 / max(args.n_prompts, 1)) ** 0.5:.3f})")
+    else:
+        best = max(usable, key=lambda k: usable[k]["score"])
     log(f"BEST step {best} (final was {final}); "
         f"attack_success {results[best]['attack_success']:.3f} vs {results[final]['attack_success']:.3f}")
     payload = dict(role=args.role, ckpt_dir=str(args.ckpt_dir), opponent=str(args.opponent),
                    n_prompts=args.n_prompts,
                    offset=args.offset, per_step=results, untrained_control=control,
                    best_step=best, final_step=final,
+                   selection_is_noisy=bool(control is not None and abs(lift) <= spread),
+                   lift_over_untrained=lift, candidate_spread=spread,
                    best_checkpoint=str(args.ckpt_dir / f"global_step{best}_hf"))
     out = args.out or (args.ckpt_dir.parent / "checkpoint_selection.json")
     out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
