@@ -66,30 +66,46 @@ CoT 格式指标仍记录，但不再额外加到这个 reward；已有 online S
 API 必须返回 `{"off_topic": true}` 或 `{"off_topic": false}`；字符串 `"false"`、
 拒答、截断和缺失字段均不算有效标签。`-3/0` 在本地计算，API 不决定扣分系数。
 
-接口需要在训练机器配置；仓库不配置实际模型账户，也不包含外部判定 API key。
-以下选一种协议，model 使用服务商实际提供的具体模型 ID：
+判定模型有两种后端，由 `TOPIC_JUDGE_BACKEND` 选择。两者使用同一套提示词、
+同一个客户端和同一份缓存，对 reward 而言可互换；区别只在召回率和成本。
+
+**默认：本地判定（`TOPIC_JUDGE_BACKEND=local`）。** `role_phase.sh` 在 GPU 0 上
+用 base model 起一个引擎，前面套 `scripts/slurm/serve_topic_judge.py` 提供的
+OpenAI 兼容接口。不需要 key，不需要外网，已发表的实验用的就是这一套：
 
 ```bash
-# Anthropic 原生 Messages API
-export TOPIC_API_PROVIDER=anthropic
-export TOPIC_API_BASE_URL=https://api.anthropic.com
-export TOPIC_API_MODEL='<你的 Claude Opus 模型 ID>'
+export GAME_REWARD_MODE=shared_binary
+export TOPIC_PENALTY=3
+export TOPIC_JUDGE_BACKEND=local   # 默认值，可不写
+# TOPIC_API_* 由 role_phase.sh 自动指向本地服务
+```
 
-# 或 OpenAI 兼容接口（包括提供 Claude 的兼容服务）；替换上面三项
-# export TOPIC_API_PROVIDER=openai_compatible
-# export TOPIC_API_BASE_URL=https://your-provider.example/v1
-# export TOPIC_API_MODEL='<服务商的模型 ID>'
+**可选：Claude Opus 5（`TOPIC_JUDGE_BACKEND=anthropic`）。** 按次计费，召回率更高：
 
+```bash
+export GAME_REWARD_MODE=shared_binary
+export TOPIC_PENALTY=3
+export TOPIC_JUDGE_BACKEND=anthropic
+export TOPIC_API_MODEL=claude-opus-5        # anthropic 后端的默认值，可不写
 read -rsp 'Topic judge API key: ' TOPIC_API_KEY; echo
 export TOPIC_API_KEY
 # 也可不导出 key，改为 export TOPIC_API_KEY_FILE=/absolute/path/to/key.txt
-
-export GAME_REWARD_MODE=shared_binary
-export TOPIC_PENALTY=3
-python -m roll.utils.topic_api --check  # 只检查配置，不调用 API
+python -m roll.utils.topic_api --check      # 只检查配置，不调用 API
 ```
 
+也可以用任何 OpenAI 兼容服务（包括转售 Claude 的服务）：设
+`TOPIC_API_PROVIDER=openai_compatible`、`TOPIC_API_BASE_URL`、`TOPIC_API_MODEL`
+和 `TOPIC_API_KEY`，`TOPIC_JUDGE_BACKEND` 保持 `anthropic` 以外的值不会另起本地服务。
 `base URL` 填服务根地址或以 `/v1` 结尾，不填写 `/messages`、`/chat/completions`。
+
+**两种后端的实测差异。** 在 60 条 held-out seed × 2 个 attacker（A3 训练前后，
+共 120 条）上人工对照：本地判定的标注是 Opus 标注的真子集 —— 精确率 100%，
+召回率 38%（A3 原始版本 20/53），pooled Cohen's kappa 0.225。两者对
+"加入 off-topic 惩罚后偏题大幅下降" 的结论一致，但幅度不同：本地判定给出
+33% → 8%，Opus 给出 88% → 28%。本地判定漏掉的主要是"换了个壳但语义仍然走样"
+的改写。做单次实验、或只需要惩罚项方向正确时用默认的本地判定即可；跑完整
+ladder 时建议换 Opus，避免 attacker 逐步收敛到本地判定看不见的那部分行为。
+判定模型名写进缓存 key 和 run contract，换后端会重新标注，不会继承旧标签。
 配置在 Ray 启动前传入各进程。训练入口提前检查必需配置，缺少 model/key 时报错。
 完成下方 [环境准备](#slurm-setup) 后，保留上面的 `GAME_REWARD_MODE=shared_binary`
 和 API 环境变量，在仓库根目录重新执行以下命令，再用新的 suffix 启动训练：
@@ -111,8 +127,8 @@ W&B 新增 `topic/topic_off_topic`、`topic/topic_reward_component`、
 `topic/reward_before_topic_penalty`、`topic/label_coverage`，并保留原 reward 日志。
 判定模型、提示词版本和系数写入运行记录；早停仍采用文档中的原 ASR/合规率/格式规则。
 更换模型、系数或 reward 模式时使用新 suffix，不能接着旧 reward 的 run 训练。
-裸脚本默认仍保留旧实验模式；`OFFTOPIC_ENABLE` 只控制旧的本地判定服务，
-不会关闭 `shared_binary` 模式下必需的外部判定。
+裸脚本默认仍保留旧实验模式；`OFFTOPIC_ENABLE` 只控制被取代的旧本地判定服务
+（默认 `0`），不会关闭 `shared_binary` 模式下必需的判定。
 
 ## Entrypoints
 
@@ -311,7 +327,12 @@ services. Prepared source, SFT files and model paths are still required.
 | --- | --- | --- |
 | `INIT_KL_COEF` | `0.01` | Base-model reverse-KL penalty for both roles; `0` disables it. |
 | `PSRO_MIDRUN_RESUME` | `0` with KL; `1` without | Continue a partial role's adapter; requires KL disabled and does not restore optimizer state. |
-| `OFFTOPIC_ENABLE` | `1` | Start the optional verifier; `0` disables its verdict. |
+| `TOPIC_JUDGE_BACKEND` | `local` | `local` runs the base model on GPU 0; `anthropic` calls the hosted judge. Only used with `GAME_REWARD_MODE=shared_binary`. |
+| `TOPIC_API_MODEL` | `claude-opus-5` / `local-topic-judge` | Judge model; part of the cache key and the run contract. |
+| `TOPIC_JUDGE_UTIL` | `0.24` | Local topic judge's fraction of GPU 0, shared with WildGuard and training. |
+| `TOPIC_JUDGE_PORT` | `JUDGE_PORT + 300` | Local topic judge port. |
+| `TOPIC_JUDGE_STARTUP_ATTEMPTS` | `90` | Health probes before failing the role; the label is required, so this does not fall back. |
+| `OFFTOPIC_ENABLE` | `0` | Start the superseded legacy verifier. Leave at `0`: it does not feed the shared reward and its 0.24 of GPU 0 overcommits the card. |
 | `OFFTOPIC_PENALTY` | `0.5` | Penalty consumed by zero-sum reward projection. |
 | `OFFTOPIC_UTIL` | `0.24` | Additional verifier fraction of GPU 0, shared with the judge and training. |
 | `OFFTOPIC_TIMEOUT_SECONDS` | `15` | Verifier read timeout; connect timeout is 3 seconds, with no retries. |
@@ -424,10 +445,11 @@ downloaded. Set `MODAL_BIN` if the executable is not on `PATH`.
   each with a 180-second request timeout plus backoff: roughly 38 minutes
   before failure. Check `judge.log`. Optional off-topic requests use the short
   timeout above.
-- **GPU memory / idle Ray:** judge, verifier, opponent, trainable engines and
-  optimizer share memory. The old measured split in the Slurm notes excludes
-  the new verifier. Budget it separately or set `OFFTOPIC_ENABLE=0` for a run
-  without that verdict. Avoid sharing GPUs, ports or Ray directories between
+- **GPU memory / idle Ray:** judge, topic judge, opponent, trainable engines and
+  optimizer share GPU 0. `No available memory for the cache blocks` at startup
+  means the fractions exceed 1.0: the usual cause is `OFFTOPIC_ENABLE=1` adding
+  the superseded legacy verifier on top of the local topic judge. Use
+  `TOPIC_JUDGE_BACKEND=anthropic` to take the topic judge off the card entirely. Avoid sharing GPUs, ports or Ray directories between
   phases; distinct ports alone do not isolate GPU allocations.
 - **Credentials and offline nodes:** Slurm works without W&B. Pre-download gated
   models and evaluation data before using an offline compute node; an HF token

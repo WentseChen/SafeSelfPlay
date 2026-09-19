@@ -27,6 +27,18 @@ Return only a JSON object with exactly one field: {"off_topic": true} for a
 material change of task, or {"off_topic": false} when the task is preserved."""
 
 
+# Two labelers are supported, and they are interchangeable from the reward's
+# point of view: both answer the same SYSTEM_PROMPT and both must return the
+# same one-field JSON envelope.  The local judge is the default because it needs
+# no credential and no network, and it is what the published runs used; the
+# hosted Opus judge is the higher-recall alternative (see README) for anyone who
+# would rather pay per label than accept the local model's misses.
+DEFAULT_MODELS = {
+    "anthropic": "claude-opus-5",
+    "openai_compatible": "local-topic-judge",
+}
+
+
 class TopicAPIError(RuntimeError):
     """A required label is unavailable; never substitute an on-topic label."""
 
@@ -54,8 +66,9 @@ class TopicAPIConfig:
                 key = Path(key_file).read_text().strip()
             except OSError:
                 raise TopicAPIError("Cannot read TOPIC_API_KEY_FILE") from None
+        model = os.environ.get("TOPIC_API_MODEL", "") or DEFAULT_MODELS.get(provider, "")
         result = cls(
-            provider=provider, base_url=base.rstrip("/"), model=os.environ.get("TOPIC_API_MODEL", ""),
+            provider=provider, base_url=base.rstrip("/"), model=model,
             api_key=key,
             timeout=float(os.environ.get("TOPIC_API_TIMEOUT", "30")),
             attempts=int(os.environ.get("TOPIC_API_ATTEMPTS", "2")),

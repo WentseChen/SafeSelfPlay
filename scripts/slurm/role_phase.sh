@@ -169,11 +169,20 @@ BASE=${BASE_MODEL_PATH:-$(ls -d "$HF_ROOT"/hub/models--mlabonne--Meta-Llama-3.1-
 JUDGE=${JUDGE_MODEL_PATH:-$(ls -d "$HF_ROOT"/hub/models--allenai--wildguard/snapshots/*/ | head -1)}
 IP=$(hostname -I | awk '{print $1}')
 JUDGE_PORT=${JUDGE_PORT:-5100}
-# Legacy local verifier. OFFTOPIC_ENABLE does not control the required
-# external topic API in GAME_REWARD_MODE=shared_binary.
-OFFTOPIC_ENABLE=${OFFTOPIC_ENABLE:-1}
+# Superseded local verifier, reachable only in GAME_REWARD_MODE=legacy.  It is
+# off by default: it does not feed the shared training/matrix reward, and its
+# 0.24 of GPU 0 on top of the policy, opponent and judge engines is what pushes
+# the card past 1.0 and fails the run with "No available memory for the cache
+# blocks".  Set OFFTOPIC_ENABLE=1 only when reproducing a pre-shared_binary run.
+OFFTOPIC_ENABLE=${OFFTOPIC_ENABLE:-0}
 OFFTOPIC_PORT=${OFFTOPIC_PORT:-$((JUDGE_PORT + 200))}
 OFFTOPIC_UTIL=${OFFTOPIC_UTIL:-0.24}
+# Which labeler answers "does this rewrite still ask what the seed asked?" in
+# GAME_REWARD_MODE=shared_binary.  `local` runs the base model on GPU 0 behind
+# an OpenAI-compatible shim and needs no credential; `anthropic` calls Opus 5.
+TOPIC_JUDGE_BACKEND=${TOPIC_JUDGE_BACKEND:-local}
+TOPIC_JUDGE_PORT=${TOPIC_JUDGE_PORT:-$((JUDGE_PORT + 300))}
+TOPIC_JUDGE_UTIL=${TOPIC_JUDGE_UTIL:-0.24}
 RAY_PORT=${RAY_PORT:-6100}
 RM_URL=http://$IP:$JUDGE_PORT/classify
 cd "$WORK"
@@ -335,6 +344,7 @@ fi
 # Keep one exit trap: installing the Ray cleanup must not forget the verifier.
 JUDGE_PID=""
 OFFTOPIC_PID=""
+TOPIC_JUDGE_PID=""
 RAY_STARTED=0
 stop_service() {
   local pid=${1:-}
@@ -348,6 +358,7 @@ stop_service() {
   wait "$pid" 2>/dev/null || true
 }
 cleanup() {
+  stop_service "$TOPIC_JUDGE_PID"
   stop_service "$OFFTOPIC_PID"
   stop_service "$JUDGE_PID"
   if [ "$RAY_STARTED" = 1 ]; then ray_shutdown; fi
@@ -392,8 +403,55 @@ echo "$TAG judge up after ~$((i * 10))s"
 # rather than lose the run, and the episode rows record the verdict as absent.
 export OFFTOPIC_URL=""
 if [ "${GAME_REWARD_MODE:-legacy}" = shared_binary ]; then
-  # Labels come directly from the external API in both rollout and matrix code.
-  echo "$TAG external binary topic judge enabled; shared training/matrix reward"
+  # The label is required here -- shared_game_reward.py raises rather than
+  # assume "on-topic" -- so unlike the legacy verifier this must come up or the
+  # phase fails now, instead of dying thousands of GPU-seconds into step 1.
+  case "$TOPIC_JUDGE_BACKEND" in
+    local)
+      # One base-model engine sharing GPU 0 with WildGuard, behind an
+      # OpenAI-compatible shim so the same client, cache and contract serve both
+      # backends.  Recall is the known weakness (see README); it is the default
+      # because it costs nothing and needs no key.
+      export TOPIC_API_PROVIDER=openai_compatible
+      export TOPIC_API_BASE_URL="http://$IP:$TOPIC_JUDGE_PORT/v1"
+      export TOPIC_API_MODEL=local-topic-judge
+      export TOPIC_API_KEY=local            # unused; the client always sends one
+      CUDA_VISIBLE_DEVICES=0 TOPIC_JUDGE_MODEL="$BASE" TOPIC_JUDGE_PORT="$TOPIC_JUDGE_PORT" \
+      TOPIC_JUDGE_UTIL="$TOPIC_JUDGE_UTIL" \
+      setsid "$PY" "$SSP_REPO/scripts/slurm/serve_topic_judge.py" \
+        > "$OUT/topic_judge.log" 2>&1 &
+      TOPIC_JUDGE_PID=$!
+      TOPIC_JUDGE_READY=0
+      for i in $(seq 1 "${TOPIC_JUDGE_STARTUP_ATTEMPTS:-90}"); do
+        kill -0 "$TOPIC_JUDGE_PID" 2>/dev/null || { echo "$TAG topic judge died" >&2; tail -20 "$OUT/topic_judge.log" >&2; exit 1; }
+        curl --noproxy '*' -fsS -m 5 "http://$IP:$TOPIC_JUDGE_PORT/health" 2>/dev/null | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' && { TOPIC_JUDGE_READY=1; break; }
+        sleep 5
+      done
+      if [ "$TOPIC_JUDGE_READY" != 1 ]; then
+        echo "$TAG topic judge did not become ready; see $OUT/topic_judge.log" >&2
+        exit 1
+      fi
+      echo "$TAG local topic judge up after ~$((i * 5))s on :$TOPIC_JUDGE_PORT"
+      ;;
+    anthropic)
+      # Higher recall, one paid call per unlabeled (seed, rewrite) pair; the
+      # sqlite cache in topic_api.py means a resumed run re-pays for nothing.
+      export TOPIC_API_PROVIDER=anthropic
+      : "${TOPIC_API_MODEL:=claude-opus-5}"; export TOPIC_API_MODEL
+      if [ -z "${TOPIC_API_KEY:-}" ] && [ -z "${TOPIC_API_KEY_FILE:-}" ]; then
+        echo "$TAG TOPIC_JUDGE_BACKEND=anthropic needs TOPIC_API_KEY or TOPIC_API_KEY_FILE" >&2
+        exit 1
+      fi
+      echo "$TAG hosted topic judge: $TOPIC_API_MODEL"
+      ;;
+    *)
+      echo "$TAG TOPIC_JUDGE_BACKEND must be 'local' or 'anthropic' (got '$TOPIC_JUDGE_BACKEND')" >&2
+      exit 1
+      ;;
+  esac
+  # Fails fast on a bad URL, model or key, and prints the judge identity that
+  # goes into the cache key and the run contract.
+  "$PY" -c 'import json;from roll.utils.topic_api import topic_api_contract;print("topic judge contract:",json.dumps(topic_api_contract(),sort_keys=True))'
 elif [ "$OFFTOPIC_ENABLE" = 1 ]; then
   CUDA_VISIBLE_DEVICES=0 OFFTOPIC_MODEL="$BASE" OFFTOPIC_PORT="$OFFTOPIC_PORT" \
   OFFTOPIC_UTIL="$OFFTOPIC_UTIL" \
