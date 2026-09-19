@@ -75,3 +75,47 @@ def test_missing_configuration_fails_before_network(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     with pytest.raises(TopicAPIError, match="Set TOPIC_API_MODEL"):
         TopicAPIConfig.from_environment()
+
+
+# --- labeler selection ------------------------------------------------------
+# The local judge is the default labeler; Opus 5 is the optional alternative.
+# Both answer the same prompt and return the same envelope, so the only thing
+# that must not drift is *which* one a given run actually used.
+
+def _environment(monkeypatch, tmp_path, **overrides):
+    for name in ("TOPIC_API_PROVIDER", "TOPIC_API_BASE_URL", "TOPIC_API_MODEL",
+                 "TOPIC_API_KEY", "TOPIC_API_KEY_FILE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("TOPIC_API_CACHE", str(tmp_path / "labels.sqlite3"))
+    for name, value in overrides.items():
+        monkeypatch.setenv(name, value)
+
+
+def test_anthropic_defaults_to_opus_5(monkeypatch, tmp_path):
+    _environment(monkeypatch, tmp_path, TOPIC_API_KEY="private-test-key")
+    resolved = TopicAPIConfig.from_environment()
+    assert resolved.provider == "anthropic"
+    assert resolved.model == "claude-opus-5"
+    assert resolved.base_url == "https://api.anthropic.com"
+
+
+def test_local_backend_needs_no_hosted_credential(monkeypatch, tmp_path):
+    _environment(monkeypatch, tmp_path, TOPIC_API_PROVIDER="openai_compatible",
+                 TOPIC_API_BASE_URL="http://127.0.0.1:5410/v1", TOPIC_API_KEY="local")
+    resolved = TopicAPIConfig.from_environment()
+    assert resolved.model == "local-topic-judge"
+
+
+def test_an_explicit_model_overrides_the_default(monkeypatch, tmp_path):
+    _environment(monkeypatch, tmp_path, TOPIC_API_KEY="private-test-key",
+                 TOPIC_API_MODEL="claude-opus-4-5")
+    assert TopicAPIConfig.from_environment().model == "claude-opus-4-5"
+
+
+def test_the_labeler_identity_is_part_of_the_cache_key(tmp_path):
+    """Switching judges must re-label, not inherit the other judge's verdicts."""
+    local = TopicAPIClient(replace(config(tmp_path, "openai_compatible"), model="local-topic-judge"))
+    hosted = TopicAPIClient(replace(config(tmp_path), model="claude-opus-5"))
+    assert local._key("seed", "rewrite") != hosted._key("seed", "rewrite")
+    # ... and the run contract records which one produced the labels
+    assert hosted.config.public_contract()["model"] == "claude-opus-5"
