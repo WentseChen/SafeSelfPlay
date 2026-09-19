@@ -49,7 +49,9 @@ skip_mock_system_prompt: true
 
 track_with: wandb
 tracker_kwargs:
-  api_key: ${oc.env:WANDB_API_KEY}
+  # Default to null so an unset variable surfaces as W&B's own "No API key
+  # configured" message, not omegaconf's InterpolationResolutionError.
+  api_key: ${oc.env:WANDB_API_KEY,null}
   project: roll-agentic
   name: ${exp_name}
 

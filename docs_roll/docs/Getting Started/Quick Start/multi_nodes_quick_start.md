@@ -12,11 +12,14 @@ curl -fsSL https://github.com/alibaba/ROLL/blob/main/scripts/install_docker_nvid
 Choose your desired Docker image from the [image addresses](https://alibaba.github.io/ROLL/docs/QuickStart/image_address). The following example uses *torch2.6.0 + vLLM0.8.4*
 ```shell
 # 1. Start a Docker container with GPU support, expose container ports, and keep the container running
+#    -e WANDB_API_KEY forwards your W&B credential into the container; without it a
+#    run configured with track_with: wandb fails at startup with "No API key configured".
 sudo docker run -dit \
   --gpus all \
   -p 9001:22 \
   --ipc=host \
   --shm-size=10gb \
+  -e WANDB_API_KEY="$WANDB_API_KEY" \
   roll-registry.cn-hangzhou.cr.aliyuncs.com/roll/pytorch:nvcr-24.05-py3-torch260-vllm084 \
   /bin/bash
 
