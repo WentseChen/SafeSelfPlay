@@ -119,11 +119,22 @@ class WandbTracker(BaseTracker):
         if isinstance(settings, dict):
             settings = {**settings, "init_timeout": 300}
         import time
+        # A missing or rejected credential is permanent: retrying it only delays
+        # the crash by the full backoff (~2 minutes) and buries the one line that
+        # says what is actually wrong. Fail immediately and name the fix.
+        from wandb.errors import AuthenticationError, UsageError
+        fatal = (AuthenticationError, UsageError)
         last_err = None
         for attempt in range(5):
             try:
                 self.run = wandb.init(project=project, tags=tags, name=name, notes=notes, dir=log_dir, mode=mode, settings=settings)
                 break
+            except fatal as e:
+                raise type(e)(
+                    f"{e}\nW&B rejected the credential. Pass tracker_kwargs.api_key, or export "
+                    f"WANDB_API_KEY -- and if you are running in a container, make sure it is "
+                    f"forwarded into it (docker run -e WANDB_API_KEY)."
+                ) from e
             except Exception as e:
                 last_err = e
                 time.sleep(min(2 ** attempt * 5, 60))
