@@ -8,6 +8,21 @@ This README covers setup, API credentials, launching scripts and troubleshooting
 Benchmark tables, protocols, checkpoint locations and historical experiments
 are in [EXPERIMENTS.md](EXPERIMENTS.md).
 
+## Docker teacher handoff
+
+**从 GitHub 克隆或收到源码小包后：先看 [docker/QUICKSTART.source.llama8b.md](docker/QUICKSTART.source.llama8b.md)。**
+`build` 自动下载运行依赖和上游数据，`prepare` 下载模型；包内保留本地 / Claude label 与三组训练命令。
+
+GitHub 不包含 API key 或私有 Docker 归档；从仓库构建时按 Quick Start 配置 W&B。
+
+老师使用的入口说明是 [docker/QUICKSTART.llama8b.md](docker/QUICKSTART.llama8b.md)，
+交付包内同内容名为 `START_HERE.md`。顺序是：导入镜像 → 选择本地 / Claude label
+→ 下载模型并检查环境 → 三个训练命令 → 早停与续跑。
+完整容器说明见 [docker/README.llama8b.md](docker/README.llama8b.md)。
+Docker 版设置 `TOPIC_JUDGE_BACKEND=local` 即可使用本地冻结模型，不需要 Claude key；
+其服务贯穿训练和矩阵计算，启动入口自动处理 API 配置与 GPU 分配。
+本文下方的裸 Slurm 脚本说明与 Docker 入口有所区别。
+
 ## Shared training / PSRO reward and external binary topic judge
 
 **设置 `GAME_REWARD_MODE=shared_binary` 启用统一终局 reward：偏题扣 3 分，不偏题这一项为 0。**
@@ -86,12 +101,21 @@ export TOPIC_JUDGE_BACKEND=local   # 默认值，可不写
 export GAME_REWARD_MODE=shared_binary
 export TOPIC_PENALTY=3
 export TOPIC_JUDGE_BACKEND=anthropic
+export TOPIC_API_PROVIDER=anthropic
+export TOPIC_API_BASE_URL=https://api.anthropic.com
 export TOPIC_API_MODEL=claude-opus-5        # anthropic 后端的默认值，可不写
 read -rsp 'Topic judge API key: ' TOPIC_API_KEY; echo
 export TOPIC_API_KEY
 # 也可不导出 key，改为 export TOPIC_API_KEY_FILE=/absolute/path/to/key.txt
 python -m roll.utils.topic_api --check      # 只检查配置，不调用 API
 ```
+
+Opus 5 的 ID 和默认 thinking 行为见 [Anthropic 官方说明](https://platform.claude.com/docs/en/models/opus-5/whats-new-opus-5)。
+本项目只需要短 JSON 标签，所以原生 Opus 5 请求明确设置
+`thinking={"type":"disabled"}`、`output_config={"effort":"low"}` 和 `max_tokens=128`，
+避免默认 thinking 用完标签预算；请求配置也进入缓存身份和 run contract。
+使用这项适配时请创建新的 run suffix。Docker 交付包的 `START_HERE.md`
+按“配置 Opus API → 下载模型 → PSRO / uniform / naive 三个命令”的顺序说明启动方式。
 
 也可以用任何 OpenAI 兼容服务（包括转售 Claude 的服务）：设
 `TOPIC_API_PROVIDER=openai_compatible`、`TOPIC_API_BASE_URL`、`TOPIC_API_MODEL`

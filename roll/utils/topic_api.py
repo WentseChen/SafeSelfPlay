@@ -92,9 +92,22 @@ class TopicAPIConfig:
                 or not 1 <= self.attempts <= 3 or not 1 <= self.concurrency <= 32):
             raise TopicAPIError("Invalid topic API timeout, attempts or concurrency")
 
+    def request_options(self):
+        options = {"max_tokens": 128}
+        if self.provider == "anthropic" and self.model.startswith("claude-opus-5"):
+            # Opus 5 enables thinking by default; those tokens share this small
+            # verdict budget. Explicitly request a short, non-thinking label.
+            options.update(thinking={"type": "disabled"}, output_config={"effort": "low"})
+        return options
+
     def public_contract(self):
-        return {"provider": self.provider, "base_url": self.base_url, "model": self.model,
-                "prompt_version": TOPIC_PROMPT_VERSION, "output": "boolean off_topic"}
+        result = {"provider": self.provider, "base_url": self.base_url, "model": self.model,
+                  "prompt_version": TOPIC_PROMPT_VERSION, "output": "boolean off_topic"}
+        if "thinking" in self.request_options():
+            # Do not reuse labels generated with the previous default-thinking
+            # request. Preserve all other providers' existing cache identities.
+            result["request_options"] = self.request_options()
+        return result
 
 
 def topic_api_contract():
@@ -143,7 +156,7 @@ class TopicAPIClient:
         c = self.config
         # JSON escaping separates the two texts without trusting their delimiters.
         content = json.dumps({"original": seed, "rewrite": rewrite}, ensure_ascii=False)
-        body = {"model": c.model, "max_tokens": 128}
+        body = {"model": c.model, **c.request_options()}
         headers = {"Content-Type": "application/json"}
         base = c.base_url if c.base_url.endswith("/v1") else c.base_url + "/v1"
         if c.provider == "anthropic":

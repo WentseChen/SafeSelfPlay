@@ -97,6 +97,8 @@ def main() -> int:
         dtype="bfloat16",
         gpu_memory_utilization=float(os.environ.get("TOPIC_JUDGE_UTIL", "0.60")),
         max_model_len=int(os.environ.get("TOPIC_JUDGE_MAX_LEN", "8192")),
+        max_num_seqs=8,
+        enforce_eager=True,
         seed=42,
     )
     # Greedy: a sampled verdict would inject noise straight into the reward.

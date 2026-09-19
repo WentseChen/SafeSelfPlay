@@ -185,7 +185,7 @@ fi
             os.kill(int(pid), 0)
 
 
-@pytest.mark.parametrize("backend", ["local", "anthropic"])
+@pytest.mark.parametrize("backend", ["local", "anthropic", "managed_local"])
 def test_shared_binary_configures_the_topic_judge_before_the_reward_contract(tmp_path, backend):
     """The reward contract resolves the topic judge, so TOPIC_API_* must already
     be set when it runs -- not later, at the service launch.  When they were set
@@ -200,6 +200,10 @@ def test_shared_binary_configures_the_topic_judge_before_the_reward_contract(tmp
     wrapper = commands / "python"
     executable(wrapper, '''
 if [[ "$*" == *serve_wildguard* || "$*" == *serve_topic_judge.py* ]]; then
+  if [[ "$*" == *serve_topic_judge.py* && "${TOPIC_JUDGE_MANAGED:-0}" == 1 ]]; then
+    echo unexpected > "$MOCK_TRAINED.duplicate"
+    exit 99
+  fi
   exec /bin/sleep 3600
 fi
 if [[ "$*" == *train_ppo_ray* ]]; then
@@ -219,7 +223,7 @@ if [[ "$*" == *classify* ]]; then echo '{"labels": [{}]}'; else echo '{"ok":true
         SSP_SFT_DIR=str(sft), SSP_OUT=str(tmp_path / "psro"),
         BASE_MODEL_PATH=str(tmp_path), JUDGE_MODEL_PATH=str(tmp_path),
         ROLE="attacker", GEN="1", TAG="A1", DRY_RUN="0",
-        GAME_REWARD_MODE="shared_binary", TOPIC_JUDGE_BACKEND=backend,
+        GAME_REWARD_MODE="shared_binary", TOPIC_JUDGE_BACKEND="local" if backend == "managed_local" else backend,
         JUDGE_STARTUP_ATTEMPTS="1", TOPIC_JUDGE_STARTUP_ATTEMPTS="1",
         RAY_BIN=str(commands / "ray"), RAY_STOP_SCOPE="temp_dir",
         RAY_PORT=str(50000 + os.getpid() % 10000), MOCK_TRAINED=str(trained))
@@ -228,6 +232,9 @@ if [[ "$*" == *classify* ]]; then echo '{"labels": [{}]}'; else echo '{"ok":true
         environment.pop(name, None)
     if backend == "anthropic":
         environment["TOPIC_API_KEY"] = "private-test-key"
+    if backend == "managed_local":
+        environment.update(TOPIC_JUDGE_MANAGED="1", TOPIC_API_BASE_URL="http://127.0.0.1:5410/v1",
+                           TOPIC_API_MODEL="frozen-local-model")
     result = subprocess.run(["bash", str(ROOT / "scripts/slurm/role_phase.sh")],
                             env=environment, capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -238,6 +245,10 @@ if [[ "$*" == *classify* ]]; then echo '{"labels": [{}]}'; else echo '{"ok":true
         assert (provider, model) == ("openai_compatible", "local-topic-judge")
         assert base_url.endswith("/v1")
         assert "local topic judge up" in result.stdout
+    elif backend == "managed_local":
+        assert (provider, model, base_url) == ("openai_compatible", "frozen-local-model", "http://127.0.0.1:5410/v1")
+        assert "reusing managed local topic judge" in result.stdout
+        assert not Path(str(trained) + ".duplicate").exists()
     else:
         assert (provider, model) == ("anthropic", "claude-opus-5")
         # the endpoint is the client's default; the phase starts no local service

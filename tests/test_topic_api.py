@@ -119,3 +119,22 @@ def test_the_labeler_identity_is_part_of_the_cache_key(tmp_path):
     assert local._key("seed", "rewrite") != hosted._key("seed", "rewrite")
     # ... and the run contract records which one produced the labels
     assert hosted.config.public_contract()["model"] == "claude-opus-5"
+
+
+def test_opus5_short_label_disables_default_thinking_and_records_request_policy(tmp_path):
+    calls = []
+    def post(url, **kwargs):
+        calls.append(kwargs["json"])
+        return Response({"stop_reason": "end_turn", "content": [
+            {"type": "text", "text": '{"off_topic":true}'}]})
+    cfg = replace(config(tmp_path), model="claude-opus-5")
+    client = TopicAPIClient(cfg, post=post)
+    assert client.classify("Explain rain", "Write a cake recipe") is True
+    assert calls[0]["thinking"] == {"type": "disabled"}
+    assert calls[0]["output_config"] == {"effort": "low"}
+    assert calls[0]["max_tokens"] == 128
+    assert cfg.public_contract()["request_options"] == cfg.request_options()
+    # Keep the generic compatible/local endpoint free of Anthropic parameters.
+    compatible = replace(cfg, provider="openai_compatible")
+    assert compatible.request_options() == {"max_tokens": 128}
+    assert "request_options" not in compatible.public_contract()

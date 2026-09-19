@@ -1,0 +1,24 @@
+# Only send training sources; exclude caches, checkpoints and virtualenvs.
+# The private teacher handoff intentionally includes docker/wandb.fixed.json.
+**
+!/*.py
+!/README.md
+!/EXPERIMENTS.md
+!/roll/
+!/roll/**
+!/_modal_patches/
+!/_modal_patches/**
+!/scripts/
+!/scripts/slurm/
+!/scripts/slurm/**
+!/data/
+!/data/safety_selfplay/
+!/data/safety_selfplay/**
+!/docker/
+!/docker/**
+**/__pycache__
+**/*.pyc
+**/.env
+**/.env.*
+**/*.log
+**/.git

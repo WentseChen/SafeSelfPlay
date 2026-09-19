@@ -130,6 +130,7 @@ celerybeat.pid
 
 # Environments
 .env
+docker/wandb.fixed.json
 .venv
 venv/
 env.bak/

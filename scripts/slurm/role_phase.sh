@@ -327,14 +327,22 @@ TRAIN_CMD=("$PY" -m openrlhf.cli.train_ppo_ray
 if [ "${GAME_REWARD_MODE:-legacy}" = shared_binary ]; then
   case "$TOPIC_JUDGE_BACKEND" in
     local)
-      # One base-model engine sharing GPU 0 with WildGuard, behind an
-      # OpenAI-compatible shim so the same client, cache and contract serve both
-      # backends.  Recall is the known weakness (see README); it is the default
-      # because it costs nothing and needs no key.
-      export TOPIC_API_PROVIDER=openai_compatible
-      export TOPIC_API_BASE_URL="http://$IP:$TOPIC_JUDGE_PORT/v1"
-      export TOPIC_API_MODEL=local-topic-judge
-      export TOPIC_API_KEY=local            # unused; the client always sends one
+      if [ "${TOPIC_JUDGE_MANAGED:-0}" = 1 ]; then
+        # The Docker supervisor owns a stable endpoint shared by all phases
+        # and PSRO cells. Preserve its model identity and URL in the contract.
+        : "${TOPIC_API_BASE_URL:?managed topic endpoint is missing}"
+        : "${TOPIC_API_MODEL:?managed topic model is missing}"
+        export TOPIC_API_PROVIDER=openai_compatible TOPIC_API_KEY=local
+      else
+        # One base-model engine sharing GPU 0 with WildGuard, behind an
+        # OpenAI-compatible shim so the same client, cache and contract serve both
+        # backends.  Recall is the known weakness (see README); it is the default
+        # because it costs nothing and needs no key.
+        export TOPIC_API_PROVIDER=openai_compatible
+        export TOPIC_API_BASE_URL="http://$IP:$TOPIC_JUDGE_PORT/v1"
+        export TOPIC_API_MODEL=local-topic-judge
+        export TOPIC_API_KEY=local            # unused; the client always sends one
+      fi
       ;;
     anthropic)
       # Higher recall, one paid call per unlabeled (seed, rewrite) pair; the
@@ -442,22 +450,26 @@ if [ "${GAME_REWARD_MODE:-legacy}" = shared_binary ]; then
   # phase fails now, instead of dying thousands of GPU-seconds into step 1.
   case "$TOPIC_JUDGE_BACKEND" in
     local)
-      CUDA_VISIBLE_DEVICES=0 TOPIC_JUDGE_MODEL="$BASE" TOPIC_JUDGE_PORT="$TOPIC_JUDGE_PORT" \
-      TOPIC_JUDGE_UTIL="$TOPIC_JUDGE_UTIL" \
-      setsid "$PY" "$SSP_REPO/scripts/slurm/serve_topic_judge.py" \
-        > "$OUT/topic_judge.log" 2>&1 &
-      TOPIC_JUDGE_PID=$!
-      TOPIC_JUDGE_READY=0
-      for i in $(seq 1 "${TOPIC_JUDGE_STARTUP_ATTEMPTS:-90}"); do
-        kill -0 "$TOPIC_JUDGE_PID" 2>/dev/null || { echo "$TAG topic judge died" >&2; tail -20 "$OUT/topic_judge.log" >&2; exit 1; }
-        curl --noproxy '*' -fsS -m 5 "http://$IP:$TOPIC_JUDGE_PORT/health" 2>/dev/null | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' && { TOPIC_JUDGE_READY=1; break; }
-        sleep 5
-      done
-      if [ "$TOPIC_JUDGE_READY" != 1 ]; then
-        echo "$TAG topic judge did not become ready; see $OUT/topic_judge.log" >&2
-        exit 1
+      if [ "${TOPIC_JUDGE_MANAGED:-0}" = 1 ]; then
+        echo "$TAG reusing managed local topic judge: $TOPIC_API_MODEL"
+      else
+        CUDA_VISIBLE_DEVICES=0 TOPIC_JUDGE_MODEL="$BASE" TOPIC_JUDGE_PORT="$TOPIC_JUDGE_PORT" \
+        TOPIC_JUDGE_UTIL="$TOPIC_JUDGE_UTIL" \
+        setsid "$PY" "$SSP_REPO/scripts/slurm/serve_topic_judge.py" \
+          > "$OUT/topic_judge.log" 2>&1 &
+        TOPIC_JUDGE_PID=$!
+        TOPIC_JUDGE_READY=0
+        for i in $(seq 1 "${TOPIC_JUDGE_STARTUP_ATTEMPTS:-90}"); do
+          kill -0 "$TOPIC_JUDGE_PID" 2>/dev/null || { echo "$TAG topic judge died" >&2; tail -20 "$OUT/topic_judge.log" >&2; exit 1; }
+          curl --noproxy '*' -fsS -m 5 "http://$IP:$TOPIC_JUDGE_PORT/health" 2>/dev/null | grep -Eq '"ok"[[:space:]]*:[[:space:]]*true' && { TOPIC_JUDGE_READY=1; break; }
+          sleep 5
+        done
+        if [ "$TOPIC_JUDGE_READY" != 1 ]; then
+          echo "$TAG topic judge did not become ready; see $OUT/topic_judge.log" >&2
+          exit 1
+        fi
+        echo "$TAG local topic judge up after ~$((i * 5))s on :$TOPIC_JUDGE_PORT"
       fi
-      echo "$TAG local topic judge up after ~$((i * 5))s on :$TOPIC_JUDGE_PORT"
       ;;
     anthropic)
       # Nothing to start: the hosted judge needs no local GPU.

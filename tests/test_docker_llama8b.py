@@ -1,0 +1,167 @@
+"""CPU tests of the handoff commands and full PSRO orchestration, without GPUs."""
+
+from __future__ import annotations
+
+import importlib.util
+import inspect
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+from types import SimpleNamespace
+
+import pytest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def restore_reward_environment(monkeypatch):
+    # main() exports defaults before exec; isolate that mutation in CPU tests.
+    monkeypatch.setenv("GAME_REWARD_MODE", "legacy")
+    monkeypatch.setenv("TOPIC_PENALTY", "3")
+    monkeypatch.setenv("TOPIC_JUDGE_BACKEND", "anthropic")
+    monkeypatch.setenv("TOPIC_API_PROVIDER", "anthropic")
+    monkeypatch.setenv("TOPIC_API_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.setenv("TOPIC_API_MODEL", "claude-opus-5")
+
+
+def test_new_container_recipe_defaults_to_shared_binary_reward(monkeypatch):
+    monkeypatch.delenv("GAME_REWARD_MODE", raising=False)
+    monkeypatch.delenv("TOPIC_PENALTY", raising=False)
+    env = entrypoint().environment()
+    assert env["GAME_REWARD_MODE"] == "shared_binary"
+    assert env["TOPIC_PENALTY"] == "3"
+    assert env["TOPIC_JUDGE_BACKEND"] == "anthropic"
+    assert env["TOPIC_API_MODEL"] == "claude-opus-5"
+
+
+def entrypoint():
+    spec = importlib.util.spec_from_file_location("llama8b_entrypoint", ROOT / "docker/llama8b_entrypoint.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("method,rounds,script", [
+    ("psro", 8, "cold_psro_local.py"), ("uniform", 8, "history_selfplay.py"),
+    ("naive", 6, "history_selfplay.py"),
+])
+def test_default_commands_and_dry_run_skip_gpu(tmp_path, monkeypatch, capsys, method, rounds, script):
+    module = entrypoint()
+    monkeypatch.setenv("DRY_RUN", "1")
+    monkeypatch.setenv("SSP_ROOT", str(tmp_path))
+    monkeypatch.setenv("SSP_WORK", "/opt/work")
+    monkeypatch.setenv("SSP_SFT_DIR", "/opt/sft")
+    for key in ("GENERATIONS", "INIT_KL_COEF", "STEPS_PER_ROLE"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(module, "model_paths", lambda *a, **kw: {"JUDGE_MODEL_PATH": "/models/judge"})
+    def unexpected_gpu():
+        pytest.fail("dry-run must not use GPUs")
+    monkeypatch.setattr(module, "check_gpus", unexpected_gpu)
+    assert module.main([method, "--run-suffix", "test_run"]) == 0
+    output = capsys.readouterr().out
+    assert script in output
+    assert f"--{'generations' if method == 'psro' else 'rounds'} {rounds}" in output
+    if method == "uniform":
+        assert "--steps 300" in output
+    if method == "naive":
+        assert "--steps 100" in output
+    if method == "psro":
+        assert "steps-per-role=300" in output
+        assert os.environ["LADDER_EARLY_STOP"] == "1"
+    assert not (tmp_path / ".llama8b-training.lock").exists()
+
+
+@pytest.mark.parametrize("argv", [
+    ["psro", "--run-suffix", "../bad"], ["uniform", "--run-suffix", "space name"],
+    ["naive", "--run-suffix", "run", "--rounds", "0"],
+    ["psro", "--run-suffix", "run", "--matrix-episodes", "255"],
+])
+def test_invalid_arguments_fail_before_model_access(monkeypatch, argv):
+    module = entrypoint()
+    monkeypatch.setattr(module, "model_paths", lambda *a, **kw: pytest.fail("model access before validation"))
+    with pytest.raises(SystemExit) as exc:
+        module.main(argv)
+    assert exc.value.code == 2
+
+
+def test_settings_reentry_and_workspace_lock(tmp_path):
+    module = entrypoint()
+    env = {"SSP_ROOT": str(tmp_path), "PSRO_ROOT": str(tmp_path / "psro"), "HF_TOKEN": "test-secret"}
+    args = SimpleNamespace(command="psro", run_suffix="run", generations=8, steps_per_role=100,
+                           matrix_episodes=4000)
+    module.record_run_settings(args, env)
+    module.record_run_settings(args, env)
+    assert "test-secret" not in (tmp_path / "psro/run/docker_run_settings.json").read_text()
+    with pytest.raises(ValueError, match="settings changed"):
+        module.record_run_settings(args, {**env, "INIT_KL_COEF": "0.01"})
+    with pytest.raises(ValueError, match="settings changed"):
+        module.record_run_settings(args, {**env, "DEF_THRESHOLD": "0.02"})
+    with module.lock_workspace(env) as lock:
+        assert os.get_inheritable(lock.fileno())
+        with pytest.raises(RuntimeError, match="Another training job"):
+            module.lock_workspace(env)
+    with module.lock_workspace(env):
+        pass
+
+
+def test_fixed_wandb_configuration_overrides_host_settings_without_logging(tmp_path, monkeypatch, capsys):
+    module = entrypoint()
+    monkeypatch.setattr(module, "REPO", tmp_path)
+    (tmp_path / "docker").mkdir()
+    config = {"WANDB_API_KEY": "private-test-value", "WANDB_ENTITY": "original-team",
+              "WANDB_PROJECT": "self-play", "WANDB_GROUP": "upstream-selfredteam-role-lora-v2"}
+    (tmp_path / "docker/wandb.fixed.json").write_text(json.dumps(config))
+    env = {"WANDB_API_KEY": "unrelated", "WANDB_GROUP": "unrelated", "WANDB_MODE": "disabled"}
+    module.configure_wandb(env)
+    assert all(env[k] == v for k, v in config.items())
+    assert env["WANDB_MODE"] == "online"
+    assert "private-test-value" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("method,dry_run,gpus", [
+    ("prepare", False, False), ("psro", False, True), ("uniform", False, True),
+    ("naive", False, True), ("psro", True, False), ("check", True, True),
+])
+def test_wrapper_gpu_selection_and_credentials(tmp_path, method, dry_run, gpus):
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    mock = binary / "docker"
+    mock.write_text(f"#!{sys.executable}\nimport sys, json\nprint(json.dumps(sys.argv[1:]))\n")
+    mock.chmod(0o755)
+    env = dict(os.environ, PATH=f"{binary}:{os.environ['PATH']}",
+               HF_TOKEN="test-secret", SSP_DOCKER_WORKSPACE=str(tmp_path / "workspace"),
+               GPU_DEVICES="4,5,6,7", DRY_RUN=str(int(dry_run)),
+               TOPIC_JUDGE_BACKEND="anthropic", TOPIC_API_MODEL="claude-opus-5",
+               TOPIC_API_KEY="private-topic-test-key")
+    command = ["bash", str(ROOT / "docker/run_llama8b.sh"), method]
+    result = subprocess.run(command, env=env, text=True, capture_output=True, check=True)
+    args = json.loads(result.stdout)
+    assert args[args.index("--ulimit") + 1] == "nofile=65536:65536"
+    assert ("--gpus" in args) == gpus
+    if gpus:
+        assert args[args.index("--gpus") + 1] == '"device=4,5,6,7"'
+    assert "test-secret" not in result.stdout
+    assert "HF_TOKEN" in args
+    assert "TOPIC_JUDGE_BACKEND" in args and "TOPIC_API_MODEL" in args
+    assert "TOPIC_API_KEY" in args and "private-topic-test-key" not in result.stdout
+    assert args[-1] == method
+
+
+
+
+def test_handoff_packaging_omits_untracked_caches_and_credentials(tmp_path):
+    archive = tmp_path / "test.build.tar.gz"
+    subprocess.run([sys.executable, str(ROOT / "docker/package_llama8b.py"), "--output", str(archive)],
+                   cwd=ROOT, check=True, capture_output=True, text=True)
+    import tarfile
+    with tarfile.open(archive) as bundle:
+        names = {member.name.split("/", 1)[1] for member in bundle.getmembers()}
+        assert {"docker/Dockerfile.llama8b", "docker/README.llama8b.md", "scripts/slurm/history_selfplay.py",
+                "roll/utils/history_selfplay.py", "START_HERE.md"} <= names
+        assert "uv.lock" not in names
+        assert "docker/wandb.fixed.json" not in names
+        assert not any(name.startswith(("output/", ".git/", ".env", "hf/")) for name in names)
