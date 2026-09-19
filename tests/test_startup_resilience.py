@@ -185,6 +185,89 @@ fi
             os.kill(int(pid), 0)
 
 
+@pytest.mark.parametrize("backend", ["local", "anthropic"])
+def test_shared_binary_configures_the_topic_judge_before_the_reward_contract(tmp_path, backend):
+    """The reward contract resolves the topic judge, so TOPIC_API_* must already
+    be set when it runs -- not later, at the service launch.  When they were set
+    at the launch site the default `local` backend died with "Set TOPIC_API_MODEL
+    and TOPIC_API_KEY" before any service started, so this runs the real
+    contract check (the wrapper execs a real interpreter for `-c`)."""
+    work, sft, commands = (tmp_path / name for name in ("work", "sft_data", "bin"))
+    for path in (work, sft, commands):
+        path.mkdir()
+    (sft / "attacker_rewrite_1180_rl_continuation.jsonl").write_text("{}\n")
+    trained = tmp_path / "trained"
+    wrapper = commands / "python"
+    executable(wrapper, '''
+if [[ "$*" == *serve_wildguard* || "$*" == *serve_topic_judge.py* ]]; then
+  exec /bin/sleep 3600
+fi
+if [[ "$*" == *train_ppo_ray* ]]; then
+  printf '%s\\n' "$TOPIC_API_PROVIDER" "$TOPIC_API_MODEL" "$TOPIC_API_BASE_URL" > "$MOCK_TRAINED"
+  exit 0
+fi
+exec ''' + shlex.quote(sys.executable) + ' "$@"\n')
+    executable(commands / "curl", '''
+/bin/sleep 0.05
+if [[ "$*" == *classify* ]]; then echo '{"labels": [{}]}'; else echo '{"ok":true}'; fi
+''')
+    executable(commands / "ray", "exit 0\n")
+    executable(commands / "pgrep", "exit 1\n")
+    executable(commands / "sleep", "exit 0\n")
+    environment = dict(os.environ, PATH=f"{commands}:{os.environ['PATH']}",
+        SSP_ROOT=str(tmp_path), SSP_PYTHON=str(wrapper), SSP_WORK=str(work),
+        SSP_SFT_DIR=str(sft), SSP_OUT=str(tmp_path / "psro"),
+        BASE_MODEL_PATH=str(tmp_path), JUDGE_MODEL_PATH=str(tmp_path),
+        ROLE="attacker", GEN="1", TAG="A1", DRY_RUN="0",
+        GAME_REWARD_MODE="shared_binary", TOPIC_JUDGE_BACKEND=backend,
+        JUDGE_STARTUP_ATTEMPTS="1", TOPIC_JUDGE_STARTUP_ATTEMPTS="1",
+        RAY_BIN=str(commands / "ray"), RAY_STOP_SCOPE="temp_dir",
+        RAY_PORT=str(50000 + os.getpid() % 10000), MOCK_TRAINED=str(trained))
+    for name in ("WANDB_API_KEY", "TOPIC_API_PROVIDER", "TOPIC_API_BASE_URL",
+                 "TOPIC_API_MODEL", "TOPIC_API_KEY", "TOPIC_API_KEY_FILE"):
+        environment.pop(name, None)
+    if backend == "anthropic":
+        environment["TOPIC_API_KEY"] = "private-test-key"
+    result = subprocess.run(["bash", str(ROOT / "scripts/slurm/role_phase.sh")],
+                            env=environment, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Set TOPIC_API_MODEL" not in result.stderr
+    provider, model, base_url = trained.read_text().splitlines()
+    if backend == "local":
+        # no credential, and the base URL points at the locally started shim
+        assert (provider, model) == ("openai_compatible", "local-topic-judge")
+        assert base_url.endswith("/v1")
+        assert "local topic judge up" in result.stdout
+    else:
+        assert (provider, model) == ("anthropic", "claude-opus-5")
+        # the endpoint is the client's default; the phase starts no local service
+        assert base_url in ("", "https://api.anthropic.com")
+        assert "hosted topic judge: claude-opus-5" in result.stdout
+        assert "local topic judge up" not in result.stdout
+
+
+def test_anthropic_backend_refuses_to_start_without_a_key(tmp_path):
+    """A missing key must stop the phase, not fall through to an unlabeled run."""
+    work, sft, commands = (tmp_path / name for name in ("work", "sft_data", "bin"))
+    for path in (work, sft, commands):
+        path.mkdir()
+    (sft / "attacker_rewrite_1180_rl_continuation.jsonl").write_text("{}\n")
+    wrapper = commands / "python"
+    executable(wrapper, "exec " + shlex.quote(sys.executable) + ' "$@"\n')
+    environment = dict(os.environ, PATH=f"{commands}:{os.environ['PATH']}",
+        SSP_ROOT=str(tmp_path), SSP_PYTHON=str(wrapper), SSP_WORK=str(work),
+        SSP_SFT_DIR=str(sft), SSP_OUT=str(tmp_path / "psro"),
+        BASE_MODEL_PATH=str(tmp_path), JUDGE_MODEL_PATH=str(tmp_path),
+        ROLE="attacker", GEN="1", TAG="A1", DRY_RUN="1",
+        GAME_REWARD_MODE="shared_binary", TOPIC_JUDGE_BACKEND="anthropic")
+    for name in ("TOPIC_API_KEY", "TOPIC_API_KEY_FILE", "WANDB_API_KEY"):
+        environment.pop(name, None)
+    result = subprocess.run(["bash", str(ROOT / "scripts/slurm/role_phase.sh")],
+                            env=environment, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 1
+    assert "needs TOPIC_API_KEY" in result.stderr
+
+
 def test_offtopic_fastapi_endpoint_accepts_request_body(monkeypatch):
     import uvicorn
     from fastapi.testclient import TestClient
