@@ -79,7 +79,7 @@ CoT 格式指标仍记录，但不再额外加到这个 reward；已有 online S
 外部 API 只判断原始 seed 与 attacker rewrite 是否保留同一任务，不评判有害性，
 不接收 defender 回答。WildGuard 继续负责有害性和拒答标签。
 API 必须返回 `{"off_topic": true}` 或 `{"off_topic": false}`；字符串 `"false"`、
-拒答、截断和缺失字段均不算有效标签。`-3/0` 在本地计算，API 不决定扣分系数。
+拒答、截断和缺失字段均不算有效标签。默认 `-2/0` 在本地计算，API 不决定扣分系数。
 
 判定模型有两种后端，由 `TOPIC_JUDGE_BACKEND` 选择。两者使用同一套提示词、
 同一个客户端和同一份缓存，对 reward 而言可互换；区别只在召回率和成本。

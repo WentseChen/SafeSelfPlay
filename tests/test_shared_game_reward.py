@@ -121,7 +121,7 @@ def test_production_rollout_and_matrix_rewards_match_even_with_format_shaping(ro
     matrix = compute_zero_sum_psro_reward(prompt_type="generated_harmful", labels=lab)
     assert attackers[0]["reward"] == matrix["attacker_zero_sum_reward"]
     assert defenders[0]["reward"] == matrix["defender_zero_sum_reward"]
-    assert attackers[0]["topic_reward_component"] == (-3 if off_topic else 0)
+    assert attackers[0]["topic_reward_component"] == (-2 if off_topic else 0)
 
 
 def test_both_training_roles_drop_same_invalid_games_as_matrix(rollout_class):
@@ -149,5 +149,5 @@ def test_external_label_flows_through_real_rollout_to_shared_reward(rollout_clas
     _, attackers, _, defenders, _ = manager.filter_and_compute_rewards(merged)
     assert seen == [{"game_idx": 0, "seed": "Explain the water cycle",
                      "rewrite": "Explain the water cycle as a teacher"}]
-    assert attackers[0]["reward"] == -2 and defenders[0]["reward"] == 2
+    assert attackers[0]["reward"] == -1 and defenders[0]["reward"] == 1
     assert attackers[0]["topic_judge_model"] == "test-model"

@@ -10,7 +10,14 @@ case "$ACTION" in
     echo "Usage: $0 build | prepare | check | {psro|uniform|naive} --run-suffix NAME | role --role attacker"
     echo "Defaults: GPU_DEVICES=0,1,2,3; SSP_DOCKER_WORKSPACE=$REPO/output/docker-llama8b"
     exit 0 ;;
-  build) exec docker build --platform linux/amd64 -f "$REPO/docker/Dockerfile.llama8b" -t "$IMAGE" "$@" "$REPO" ;;
+  build)
+    REVISION=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)
+    if git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 &&
+       ! git -C "$REPO" diff --quiet HEAD; then REVISION="$REVISION-dirty"; fi
+    exec docker build --platform linux/amd64 -f "$REPO/docker/Dockerfile.llama8b" \
+      --build-arg "SSP_GIT_SHA=$REVISION" \
+      --build-arg "SSP_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      -t "$IMAGE" "$@" "$REPO" ;;
   prepare|check|psro|uniform|naive|role) ;;
   *) echo "Unknown command: $ACTION" >&2; exit 2 ;;
 esac
@@ -49,7 +56,7 @@ for name in HF_TOKEN WANDB_API_KEY WANDB_ENTITY WANDB_PROJECT WANDB_GROUP WANDB_
             OPPONENT OPPONENT_POOL_JSON START_ADAPTER HF_HUB_OFFLINE; do
   if [[ -v $name ]]; then OPTIONS+=(-e "$name"); fi
 done
-if [ "${TOPIC_JUDGE_BACKEND:-anthropic}" != local ] && [ -n "${TOPIC_API_KEY_FILE:-}" ]; then
+if [ "${TOPIC_JUDGE_BACKEND:-local}" != local ] && [ -n "${TOPIC_API_KEY_FILE:-}" ]; then
   [ -f "$TOPIC_API_KEY_FILE" ] || { echo "TOPIC_API_KEY_FILE is not a regular file" >&2; exit 2; }
   KEY_FILE=$(realpath "$TOPIC_API_KEY_FILE")
   OPTIONS+=(--mount "type=bind,source=$KEY_FILE,target=/run/secrets/topic_api_key,readonly"
