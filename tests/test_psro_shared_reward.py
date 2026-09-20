@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.mark.parametrize("mode", ["legacy", "shared_binary"])
 def test_full_eight_round_psro_saves_matrix_without_fabricating_benchmarks(tmp_path, monkeypatch, mode):
     monkeypatch.setenv("GAME_REWARD_MODE", mode)
-    monkeypatch.setenv("TOPIC_PENALTY", "3")
+    monkeypatch.setenv("TOPIC_PENALTY", "2")
     monkeypatch.setenv("TOPIC_API_MODEL", "test-fixed-model")
     monkeypatch.setenv("TOPIC_API_KEY", "test-key")
     sys.path.insert(0, str(ROOT / "scripts/slurm"))
@@ -61,7 +61,8 @@ def test_full_eight_round_psro_saves_matrix_without_fabricating_benchmarks(tmp_p
     assert persisted["completed"] is False
     assert persisted["evaluations"] == {}
     if mode == "shared_binary":
-        assert persisted["contract"]["shared_game_reward"]["topic_penalty"] == 3
-        monkeypatch.setenv("TOPIC_PENALTY", "2")
+        assert persisted["contract"]["shared_game_reward"]["topic_penalty"] == 2
+        # Must DIFFER from the pinned default, or there is no drift to reject.
+        monkeypatch.setenv("TOPIC_PENALTY", "3")
         with pytest.raises(RuntimeError, match="contract|non-extensible"):
             psro.advance_cold_psro(**kwargs)

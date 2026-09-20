@@ -20,7 +20,7 @@ from roll.utils.role_lora_zero_sum_psro import compute_zero_sum_psro_reward, ana
 @pytest.fixture(autouse=True)
 def shared_mode(monkeypatch):
     monkeypatch.setenv("GAME_REWARD_MODE", "shared_binary")
-    monkeypatch.setenv("TOPIC_PENALTY", "3")
+    monkeypatch.setenv("TOPIC_PENALTY", "2")
 
 
 def labels(*, off_topic=False, harmful=True, refusal=False):
@@ -28,19 +28,38 @@ def labels(*, off_topic=False, harmful=True, refusal=False):
             "response_refusal": "refusal" if refusal else "compliance", "off_topic": off_topic}
 
 
-def test_off_topic_success_strictly_worse_than_any_on_topic_outcome():
+def test_off_topic_success_is_never_better_than_an_on_topic_outcome():
+    penalty = shared.topic_penalty()
     accepted = []
     for prompt, response, refusal in product(("harmful", "unharmful"), ("harmful", "unharmful"), ("refusal", "compliance")):
         lab = {"prompt_harmfulness": prompt, "response_harmfulness": response,
                "response_refusal": refusal, "off_topic": False}
         clean = compute_zero_sum_psro_reward(prompt_type="generated_harmful", labels=lab)
         drift = compute_zero_sum_psro_reward(prompt_type="generated_harmful", labels={**lab, "off_topic": True})
-        assert drift["attacker_zero_sum_reward"] == pytest.approx(clean["attacker_zero_sum_reward"] - 3)
+        assert drift["attacker_zero_sum_reward"] == pytest.approx(clean["attacker_zero_sum_reward"] - penalty)
         assert drift["defender_zero_sum_reward"] == -drift["attacker_zero_sum_reward"]
         accepted.append((clean["attacker_zero_sum_reward"], drift["attacker_zero_sum_reward"]))
-    assert max(drift for _, drift in accepted) < min(clean for clean, _ in accepted)
-    assert compute_zero_sum_psro_reward(prompt_type="generated_harmful", labels=labels(off_topic=True))["attacker_zero_sum_reward"] == -2
-    assert shared.shared_game_reward_bounds() == (-4, 1)
+    # At the default penalty of 2.0 an off-topic WIN ties the worst on-topic
+    # outcome (1 - 2 == -1) rather than beating it, so the invariant here is
+    # "never better", not "strictly worse". See the test below for the exact
+    # threshold: the on-topic payoffs really do span [-1, 1], so strict
+    # dominance needs penalty > 2.
+    assert max(drift for _, drift in accepted) <= min(clean for clean, _ in accepted)
+    assert compute_zero_sum_psro_reward(
+        prompt_type="generated_harmful", labels=labels(off_topic=True))["attacker_zero_sum_reward"] == 1 - penalty
+    assert shared.shared_game_reward_bounds() == (-1 - penalty, 1)
+
+
+def test_strict_dominance_needs_a_penalty_above_two():
+    """The span of on-topic payoffs is exactly what an off-topic win must cover."""
+    reachable = sorted({compute_zero_sum_psro_reward(
+        prompt_type="generated_harmful",
+        labels={"prompt_harmfulness": p, "response_harmfulness": r,
+                "response_refusal": rf, "off_topic": False})["attacker_zero_sum_reward"]
+        for p, r, rf in product(("harmful", "unharmful"), ("harmful", "unharmful"),
+                                ("refusal", "compliance"))})
+    assert reachable[0] == -1.0 and reachable[-1] == 1.0
+    assert reachable[-1] - reachable[0] == 2.0   # so penalty == 2 ties, > 2 dominates
 
 
 @pytest.mark.parametrize("invalid", [None, "false", "true", 0, 1])
@@ -58,7 +77,7 @@ def test_matrix_statistics_accept_full_penalized_range():
         rows.append({"episode_index": i, "prompt_type": prompt_type,
                      **compute_zero_sum_psro_reward(prompt_type=prompt_type, labels=lab)})
     result = analyze_zero_sum_convergence(rows, sample_counts=[2, 4])
-    assert result["reward_bounds"] == [-4, 1]
+    assert result["reward_bounds"] == [-1 - shared.topic_penalty(), 1]
 
 
 @pytest.fixture(scope="module")

@@ -99,7 +99,7 @@ API 必须返回 `{"off_topic": true}` 或 `{"off_topic": false}`；字符串 `"
 
 ```bash
 export GAME_REWARD_MODE=shared_binary
-export TOPIC_PENALTY=3
+export TOPIC_PENALTY=2
 export TOPIC_JUDGE_BACKEND=local   # 默认值，可不写
 # TOPIC_API_* 由 role_phase.sh 自动指向本地服务
 ```
@@ -108,7 +108,7 @@ export TOPIC_JUDGE_BACKEND=local   # 默认值，可不写
 
 ```bash
 export GAME_REWARD_MODE=shared_binary
-export TOPIC_PENALTY=3
+export TOPIC_PENALTY=2
 export TOPIC_JUDGE_BACKEND=anthropic
 export TOPIC_API_PROVIDER=anthropic
 export TOPIC_API_BASE_URL=https://api.anthropic.com
@@ -268,7 +268,7 @@ Export the topic API configuration above and the actual downloaded model paths:
 export BASE_MODEL_PATH='/absolute/path/to/llama-8b-abliterated/snapshot'
 export JUDGE_MODEL_PATH='/absolute/path/to/wildguard/snapshot'
 export COLD_PSRO_BASE_MODEL_DIR="$BASE_MODEL_PATH"
-export GAME_REWARD_MODE=shared_binary TOPIC_PENALTY=3
+export GAME_REWARD_MODE=shared_binary TOPIC_PENALTY=2
 export INIT_KL_COEF=0 PSRO_MIDRUN_RESUME=0 OFFTOPIC_ENABLE=0
 export LADDER_EARLY_STOP=1 MICRO_ROLLOUT=8
 export STEPS_PER_ROLE=300 SAVE_STEPS_CONTRACT=10 MATRIX_EPISODES=4000
@@ -369,6 +369,7 @@ services. Prepared source, SFT files and model paths are still required.
 | `TOPIC_JUDGE_PORT` | `JUDGE_PORT + 300` | Local topic judge port. |
 | `TOPIC_JUDGE_STARTUP_ATTEMPTS` | `90` | Health probes before failing the role; the label is required, so this does not fall back. |
 | `OFFTOPIC_ENABLE` | `0` | Start the superseded legacy verifier. Leave at `0`: it does not feed the shared reward and its 0.24 of GPU 0 overcommits the card. |
+| `TOPIC_PENALTY` | `2` | Deduction for an off-topic verdict, on a payoff otherwise in `[-1, 1]`. At 2 an off-topic win ties the worst on-topic outcome; strict dominance needs `> 2`. |
 | `OFFTOPIC_PENALTY` | `0.5` | Penalty consumed by zero-sum reward projection. |
 | `OFFTOPIC_UTIL` | `0.24` | Additional verifier fraction of GPU 0, shared with the judge and training. |
 | `OFFTOPIC_TIMEOUT_SECONDS` | `15` | Verifier read timeout; connect timeout is 3 seconds, with no retries. |

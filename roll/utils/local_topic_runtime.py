@@ -63,14 +63,17 @@ def run_with_local_topic(command: list[str], env: dict[str, str], repo: Path) ->
         for sig in (signal.SIGTERM, signal.SIGINT):
             prior_handlers[sig] = signal.signal(sig, interrupted)
         with log_path.open("ab") as log:
-            service_env = dict(env, CUDA_VISIBLE_DEVICES="3", VLLM_USE_V1="0",
-                               TOPIC_JUDGE_NAME=env["TOPIC_API_MODEL"])
+            # Honour TOPIC_JUDGE_GPU: hard-coding 3 here made the knob a lie in
+            # the managed path, and the whole point of it is that this engine
+            # must not land on a card another engine already holds.
+            service_env = dict(env, CUDA_VISIBLE_DEVICES=env.get("TOPIC_JUDGE_GPU", "3"),
+                               VLLM_USE_V1="0", TOPIC_JUDGE_NAME=env["TOPIC_API_MODEL"])
             service = subprocess.Popen(
                 [env["SSP_PYTHON"], str(repo / "scripts/slurm/serve_topic_judge.py")],
                 env=service_env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
             )
             wait_for_topic_service(service, env, log_path)
-            print(f"Local topic judge ready on GPU 3: {env['TOPIC_API_MODEL']}; log: {log_path}", flush=True)
+            print(f"Local topic judge ready on GPU {env.get('TOPIC_JUDGE_GPU', '3')}: {env['TOPIC_API_MODEL']}; log: {log_path}", flush=True)
             trainer = subprocess.Popen(command, env=env, start_new_session=True)
             while trainer.poll() is None:
                 if service.poll() is not None:
