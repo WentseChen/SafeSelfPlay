@@ -359,3 +359,98 @@ def test_default_kl_never_anchors_to_partial_adapter(tmp_path, monkeypatch, expl
     assert not (run / "training/A1.segment_10").exists()
     if explicit_resume:
         assert weights.read_bytes() == b"existing checkpoint"
+
+
+def _judge_placement_run(tmp_path, gpus, overrides=None):
+    """Run role_phase.sh in shared_binary and report which card each judge got."""
+    work, sft, commands = (tmp_path / name for name in ("work", "sft_data", "bin"))
+    for path in (work, sft, commands):
+        path.mkdir()
+    (sft / "attacker_rewrite_1180_rl_continuation.jsonl").write_text("{}\n")
+    trained = tmp_path / "trained"
+    wrapper = commands / "python"
+    # Each judge records the card it was handed; the trainer records nothing but
+    # the fact that startup got that far.
+    executable(wrapper, '''
+if [[ "$*" == *serve_wildguard* ]]; then
+  echo "$CUDA_VISIBLE_DEVICES" > "$MOCK_TRAINED.wildguard"
+  exec /bin/sleep 3600
+fi
+if [[ "$*" == *serve_topic_judge.py* ]]; then
+  echo "$CUDA_VISIBLE_DEVICES" > "$MOCK_TRAINED.topic"
+  echo "$TOPIC_JUDGE_UTIL $TOPIC_JUDGE_MAX_LEN" > "$MOCK_TRAINED.topicsize"
+  exec /bin/sleep 3600
+fi
+if [[ "$*" == *train_ppo_ray* ]]; then : > "$MOCK_TRAINED"; exit 0; fi
+exec ''' + shlex.quote(sys.executable) + ' "$@"\n')
+    executable(commands / "curl", '''
+/bin/sleep 0.05
+if [[ "$*" == *classify* ]]; then echo '{"labels": [{}]}'; else echo '{"ok":true}'; fi
+''')
+    executable(commands / "ray", "exit 0\n")
+    executable(commands / "pgrep", "exit 1\n")
+    executable(commands / "sleep", "exit 0\n")
+    environment = dict(os.environ, PATH=f"{commands}:{os.environ['PATH']}",
+        SSP_ROOT=str(tmp_path), SSP_PYTHON=str(wrapper), SSP_WORK=str(work),
+        SSP_SFT_DIR=str(sft), SSP_OUT=str(tmp_path / "psro"),
+        BASE_MODEL_PATH=str(tmp_path), JUDGE_MODEL_PATH=str(tmp_path),
+        ROLE="attacker", GEN="1", TAG="A1", DRY_RUN="0", GPUS=str(gpus),
+        GAME_REWARD_MODE="shared_binary", TOPIC_JUDGE_BACKEND="local",
+        JUDGE_STARTUP_ATTEMPTS="1", TOPIC_JUDGE_STARTUP_ATTEMPTS="1",
+        RAY_BIN=str(commands / "ray"), RAY_STOP_SCOPE="temp_dir",
+        RAY_PORT=str(50000 + os.getpid() % 10000), MOCK_TRAINED=str(trained))
+    for name in ("WANDB_API_KEY", "TOPIC_API_PROVIDER", "TOPIC_API_BASE_URL",
+                 "TOPIC_API_MODEL", "TOPIC_API_KEY", "TOPIC_API_KEY_FILE",
+                 "JUDGE_GPU", "TOPIC_JUDGE_GPU", "TOPIC_JUDGE_UTIL", "TOPIC_JUDGE_MAX_LEN"):
+        environment.pop(name, None)
+    environment.update(overrides or {})
+    result = subprocess.run(["bash", str(ROOT / "scripts/slurm/role_phase.sh")],
+                            env=environment, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    read = lambda suffix: Path(str(trained) + suffix).read_text().strip()
+    return read(".wildguard"), read(".topic"), read(".topicsize"), result
+
+
+def test_the_two_judges_do_not_share_a_card(tmp_path):
+    # Stacking them is what killed the run: vLLM charges the second engine for
+    # what the first already holds on that card, so it gets less than its own
+    # weights and dies with "No available memory for the cache blocks".
+    wildguard, topic, _, _ = _judge_placement_run(tmp_path, gpus=4)
+    assert wildguard == "0"
+    assert topic != wildguard
+
+
+def test_the_topic_judge_stays_inside_the_allocation(tmp_path):
+    # A card the job was never given is as useless as a full one.
+    for gpus in (2, 4, 8):
+        case = tmp_path / f"g{gpus}"
+        case.mkdir()
+        _, topic, _, _ = _judge_placement_run(case, gpus=gpus)
+        assert 0 <= int(topic) < gpus
+
+
+def test_a_single_gpu_job_falls_back_to_sharing(tmp_path):
+    # There is nowhere else to put it; sharing beats pointing at a missing card.
+    wildguard, topic, _, _ = _judge_placement_run(tmp_path, gpus=1)
+    assert topic == wildguard == "0"
+
+
+def test_the_topic_judge_is_sized_from_the_measured_footprint(tmp_path):
+    # 17 GiB of 143771 MiB is 0.118 of an H200; 0.13 is that plus headroom.
+    # 8192 context bought nothing over 4096 for a 24-token verdict.
+    _, _, size, _ = _judge_placement_run(tmp_path, gpus=4)
+    util, max_len = size.split()
+    assert 0.118 < float(util) <= 0.20
+    assert int(max_len) == 4096
+
+
+def test_the_placement_is_still_overridable(tmp_path):
+    _, topic, _, _ = _judge_placement_run(tmp_path, gpus=4, overrides={"TOPIC_JUDGE_GPU": "3"})
+    assert topic == "3"
+
+
+def test_the_run_records_per_card_memory(tmp_path):
+    # Rebalancing these fractions without measured numbers is what produced the
+    # 0.35 + 0.45 that did not fit.
+    *_, result = _judge_placement_run(tmp_path, gpus=4)
+    assert "GPU memory after judges" in result.stdout
