@@ -12,6 +12,10 @@ case "$ACTION" in
     exit 0 ;;
   build)
     REVISION=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)
+    if [ "$REVISION" = unknown ] && [ -f "$REPO/BUILD_BUNDLE.json" ]; then
+      BUNDLE_REVISION=$(sed -n 's/.*"base_git_commit": "\([0-9a-f]*\)".*/\1/p' "$REPO/BUILD_BUNDLE.json")
+      if [ -n "$BUNDLE_REVISION" ]; then REVISION=$BUNDLE_REVISION; fi
+    fi
     if git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 &&
        ! git -C "$REPO" diff --quiet HEAD; then REVISION="$REVISION-dirty"; fi
     exec docker build --platform linux/amd64 -f "$REPO/docker/Dockerfile.llama8b" \

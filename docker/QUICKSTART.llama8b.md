@@ -143,7 +143,8 @@ export RUN_LABELER=local
 即使 shell 留有旧 Claude 配置，本地模式也会覆盖接口与 key，避免调用云端。
 同一个本地服务贯穿全部训练阶段和 PSRO 矩阵计算，不会每个阶段换一次 label 模型。
 
-本地模型使用容器内 GPU 3，默认显存比例 0.16；训练仍使用四张卡，
+本地模型使用容器内 GPU 3，默认显存比例 0.13、上下文 4096；训练仍使用四张卡，
+rollout / opponent 显存比例为 0.28 / 0.26，rollout 引擎不休眠。
 PSRO 算矩阵时，GPU 0 运行 WildGuard，GPU 1、2 运行两个 cell worker，GPU 3 保留给 label。
 自定义更大的模型需重新核对显存，当前默认预算按 8B 准备。
 日志在持久化目录的 `topic_judge.log`，退出时自动清理该服务。

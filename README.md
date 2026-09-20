@@ -13,10 +13,12 @@ are in [EXPERIMENTS.md](EXPERIMENTS.md).
 **从 GitHub 克隆或收到源码小包后：先看 [docker/QUICKSTART.source.llama8b.md](docker/QUICKSTART.source.llama8b.md)。**
 `build` 自动下载运行依赖和上游数据，`prepare` 下载模型；包内保留本地 / Claude label 与三组训练命令。
 
-GitHub 不包含 API key 或私有 Docker 归档；从仓库构建时按 Quick Start 配置 W&B。
+可从 [GitHub Releases](https://github.com/xudongwu-0/SafeSelfPlay/releases/latest) 下载约 1.75 MB 的
+`safeselfplay-llama8b-h200-source.build.tar.gz`。它包含源码和构建脚本，不包含镜像、模型或 API key；
+老师在本地构建环境，并按 Quick Start 配置 W&B。
 
-老师使用的入口说明是 [docker/QUICKSTART.llama8b.md](docker/QUICKSTART.llama8b.md)，
-交付包内同内容名为 `START_HERE.md`。顺序是：导入镜像 → 选择本地 / Claude label
+源码小包内的入口说明是 `START_HERE.md`，对应 [源码 Quick Start](docker/QUICKSTART.source.llama8b.md)。
+顺序是：构建镜像 → 选择本地 / Claude label
 → 下载模型并检查环境 → 三个训练命令 → 早停与续跑。
 完整容器说明见 [docker/README.llama8b.md](docker/README.llama8b.md)。
 Docker 版设置 `TOPIC_JUDGE_BACKEND=local` 即可使用本地冻结模型，不需要 Claude key；
@@ -25,7 +27,7 @@ Docker 版设置 `TOPIC_JUDGE_BACKEND=local` 即可使用本地冻结模型，�
 
 ## Shared training / PSRO reward and external binary topic judge
 
-**设置 `GAME_REWARD_MODE=shared_binary` 启用统一终局 reward：偏题扣 3 分，不偏题这一项为 0。**
+**设置 `GAME_REWARD_MODE=shared_binary` 启用统一终局 reward：默认偏题扣 2 分，不偏题这一项为 0。**
 PSRO、uniform history、naive self-play 的训练与 PSRO 矩阵调用同一函数
 `roll/utils/shared_game_reward.py::compute_shared_game_reward`。
 测试此方法请先 `git pull --ff-only`，再按下方说明更新训练工作副本。

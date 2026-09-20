@@ -67,7 +67,8 @@ def main() -> int:
     metadata = {
         "kind": "docker-build-bundle", "image_included": False, "model_weights_included": False,
         "base_git_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT).decode().strip(),
-        "contains_current_working_tree_changes": True,
+        "contains_current_working_tree_changes": bool(subprocess.check_output(
+            ["git", "status", "--porcelain", "--untracked-files=no"], cwd=ROOT).strip()),
         "fixed_wandb_credential_included": args.include_wandb,
         "quickstart": "source-build" if args.source_only_guide else "prebuilt-image",
         "created_utc": datetime.now(timezone.utc).isoformat(), "files": len(files),
