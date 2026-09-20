@@ -3,6 +3,7 @@
 import importlib.util
 from pathlib import Path
 import signal
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -86,3 +87,28 @@ def test_cleanup_reaches_children_even_after_parent_exit(monkeypatch):
     monkeypatch.setattr(runtime.os, "killpg", lambda pid, sig: sent.append((pid, sig)))
     runtime.stop_process_group(process)
     assert sent == [(1234, signal.SIGTERM), (1234, signal.SIGKILL)]
+
+
+def test_a_busy_topic_judge_port_explains_itself(tmp_path, monkeypatch):
+    """A crashed run leaves a judge holding the port; the container always
+    reuses the same default, so this is the first thing the next run hits."""
+    import socket
+    from roll.utils.local_topic_runtime import run_with_local_topic
+
+    holder = socket.socket()
+    holder.bind(("127.0.0.1", 0))
+    holder.listen(1)
+    port = holder.getsockname()[1]
+    try:
+        env = {"TOPIC_JUDGE_PORT": str(port), "SSP_ROOT": str(tmp_path),
+               "SSP_PYTHON": sys.executable, "TOPIC_API_MODEL": "local-topic-judge"}
+        with pytest.raises(RuntimeError) as raised:
+            run_with_local_topic(["/bin/true"], env, Path("/nonexistent"))
+    finally:
+        holder.close()
+    message = str(raised.value)
+    assert str(port) in message                 # which port
+    assert "already in use" in message          # what is wrong
+    assert "TOPIC_JUDGE_PORT" in message        # how to proceed
+    # and it must not quietly adopt whatever is already answering there
+    assert "did not start" in message
