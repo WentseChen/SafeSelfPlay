@@ -244,3 +244,45 @@ def test_four_h200s_are_the_documented_default(tmp_path):
                             env=env, text=True, capture_output=True, check=True)
     args = json.loads(result.stdout)
     assert args[args.index("--gpus") + 1] == '"device=0,1,2,3"'
+
+
+def test_check_reports_which_commit_is_baked_in(monkeypatch, capsys):
+    # The repo is COPYed into the image, so a container's code is frozen at
+    # build time while /workspace persists across images. Without a stamp a
+    # stale image is indistinguishable from a fresh one.
+    module = entrypoint()
+    module.report_build_provenance({"JUDGE_GPU": "0", "TOPIC_JUDGE_GPU": "3"})
+    printed = capsys.readouterr().out
+    assert "image build:" in printed
+    assert "judge placement:" in printed and "GPU 3" in printed
+
+
+def test_check_refuses_an_image_that_predates_the_placement_fix(tmp_path, monkeypatch):
+    # Running that image reproduces "No available memory for the cache blocks"
+    # at step 0, which is an expensive way to learn you forgot to rebuild.
+    module = entrypoint()
+    stale = tmp_path / "scripts/slurm"
+    stale.mkdir(parents=True)
+    (stale / "role_phase.sh").write_text("JUDGE_UTIL=${JUDGE_UTIL:-0.13}\n")  # no TOPIC_JUDGE_GPU
+    monkeypatch.setattr(module, "REPO", tmp_path)
+    with pytest.raises(RuntimeError) as raised:
+        module.report_build_provenance({})
+    message = str(raised.value)
+    assert "predates the judge-placement fix" in message
+    assert "TOPIC_JUDGE_GPU" in message
+    assert "run_llama8b.sh build" in message          # tells you how to fix it
+
+
+def test_build_stamps_the_commit(tmp_path):
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    mock = binary / "docker"
+    mock.write_text(f"#!{sys.executable}\nimport sys, json\nprint(json.dumps(sys.argv[1:]))\n")
+    mock.chmod(0o755)
+    env = dict(os.environ, PATH=f"{binary}:{os.environ['PATH']}")
+    result = subprocess.run(["bash", str(ROOT / "docker/run_llama8b.sh"), "build"],
+                            env=env, text=True, capture_output=True, check=True)
+    args = json.loads(result.stdout)
+    build_args = [args[i + 1] for i, a in enumerate(args) if a == "--build-arg"]
+    assert any(a.startswith("SSP_GIT_SHA=") and a != "SSP_GIT_SHA=" for a in build_args)
+    assert any(a.startswith("SSP_BUILD_DATE=") for a in build_args)

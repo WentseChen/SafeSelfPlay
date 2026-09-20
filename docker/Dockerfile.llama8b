@@ -32,6 +32,18 @@ COPY data/safety_selfplay/ ./data/safety_selfplay/
 COPY docker/ ./docker/
 COPY README.md EXPERIMENTS.md ./
 
+# Build provenance. The repo is COPYed in, not mounted, so a container's code is
+# frozen at build time and a stale image is otherwise indistinguishable from a
+# fresh one -- it just silently reintroduces whatever was fixed since. Stamping
+# the commit lets `check` say which code is actually inside.
+ARG SSP_GIT_SHA=unknown
+ARG SSP_BUILD_DATE=unknown
+LABEL org.opencontainers.image.revision="$SSP_GIT_SHA" \
+      org.opencontainers.image.created="$SSP_BUILD_DATE" \
+      org.opencontainers.image.title="SafeSelfPlay Llama-3.1-8B role-LoRA (4xH200)"
+RUN printf 'git_sha=%s\nbuild_date=%s\n' "$SSP_GIT_SHA" "$SSP_BUILD_DATE" \
+    > /opt/SafeSelfPlay/BUILD_INFO
+
 # Patched code and SFT data are part of the image. Only model caches and run
 # artifacts belong on the persistent /workspace mount; startup never repatches.
 ENV SSP_ROOT=/workspace \

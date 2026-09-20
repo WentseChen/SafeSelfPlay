@@ -12,7 +12,7 @@
 其中先选择本地模型或 Opus API 做 label，再执行三个训练命令。
 
 `.build.tar.gz` 是源码构建包；`.image.tar.gz` 是可 `docker load` 导入的完整镜像。
-镜像标签为 `safeselfplay:llama8b-h200-labels-20260919`，包含最新程序和已准备的上游补丁。
+镜像标签为 `safeselfplay:llama8b-h200-labels-20260920`，包含最新程序和已准备的上游补丁。
 预制镜像复用此前已通过检查的 CUDA / vLLM 层，其构建和测试记录见镜像交付目录的 `BUILD_VALIDATION.json`。
 源码构建版在老师的服务器安装依赖并执行检查，实际版本写入镜像内 `/opt/runtime-packages.txt`。
 
@@ -22,6 +22,24 @@ Docker 镜像把程序、Python/CUDA 用户态依赖和启动方式装进一个�
 从镜像启动的进程叫容器。老师的机器不需要逐个安装本项目的 Python 包。
 容器共用宿主机内核，GPU 仍由宿主机驱动提供：镜像不会把一台普通电脑变成 H200 服务器。
 参见 [Docker 容器介绍](https://docs.docker.com/get-started/docker-concepts/the-basics/what-is-a-container/)。
+
+## 0. 代码更新后必须重建镜像
+
+镜像里的代码是 `COPY` 进去的，不是挂载的：运行时只绑定 `$WORKSPACE`（数据、
+checkpoint、模型缓存），**不包含仓库代码**。因此拉取新代码后必须重建镜像，
+否则容器里跑的仍是旧代码。判定模型分卡的修复就在其中——旧镜像会把两个 judge
+放在同一张卡上，训练在第 0 步就以
+`No available memory for the cache blocks` 失败。
+
+```bash
+git pull                                  # 取得已合并的修复
+bash docker/run_llama8b.sh build          # 会把当前 commit 打进镜像
+bash docker/run_llama8b.sh check          # 打印镜像内的 commit，并核对分卡修复
+```
+
+`check` 会读取镜像内 `BUILD_INFO` 并检查烘焙进去的 `role_phase.sh` 是否包含
+`TOPIC_JUDGE_GPU`；镜像过旧时直接报错，不会等到训练开始才失败。
+`$WORKSPACE` 不受影响，缓存与 checkpoint 会保留，只需替换镜像。
 
 ## 1. 服务器要求和构建
 
