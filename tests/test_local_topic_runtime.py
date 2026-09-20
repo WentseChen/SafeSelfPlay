@@ -35,7 +35,10 @@ def test_local_mode_resolves_before_contract_without_cloud_credentials(tmp_path,
     assert env["TOPIC_JUDGE_MANAGED"] == "1"
     assert env["TOPIC_API_KEY"] == "local" and "TOPIC_API_KEY_FILE" not in env
     assert env["TOPIC_API_MODEL"] == module.BASE_MODEL
-    assert (env["TOPIC_JUDGE_UTIL"], env["UTIL"], env["OPP_UTIL"], env["VLLM_SLEEP"]) == ("0.16", "0.24", "0.22", "1")
+    # The settings of the validated 4xH200 A3 run: judge ~17 GiB on its own
+    # card, engines resident. See test_docker_llama8b for the measurement.
+    assert (env["TOPIC_JUDGE_UTIL"], env["UTIL"], env["OPP_UTIL"], env["VLLM_SLEEP"]) == ("0.13", "0.28", "0.26", "0")
+    assert env["TOPIC_JUDGE_GPU"] != env.get("JUDGE_GPU", "0")
     for key in ("TOPIC_API_PROVIDER", "TOPIC_API_BASE_URL", "TOPIC_API_MODEL", "TOPIC_API_KEY"):
         monkeypatch.setenv(key, env[key])
     assert TopicAPIConfig.from_environment().provider == "openai_compatible"
