@@ -16,7 +16,14 @@ from roll.utils.upstream_v2_payoff import compute_upstream_v2_raw_rewards
 
 
 SHARED_GAME_REWARD_VERSION = "shared-terminal-binary-topic-v1"
-DEFAULT_TOPIC_PENALTY = 3.0
+# An off-topic verdict costs the attacker this much on a payoff that otherwise
+# lives in [-1, 1].  2.0 is the point where the best off-topic outcome (1 - P)
+# equals the worst on-topic one (-1), so drifting off-topic is dominated rather
+# than merely discouraged, and it keeps the penalty's contribution to reward
+# variance at parity with the game's own instead of several times it.  Measured
+# at 2.0 on a 100-step A3 oracle: off-topic 43% -> 87% on-topic against a
+# step-matched no-penalty control, with attack reward still climbing.
+DEFAULT_TOPIC_PENALTY = 2.0
 
 
 class InvalidGame(ValueError):

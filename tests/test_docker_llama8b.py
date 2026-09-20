@@ -21,8 +21,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def restore_reward_environment(monkeypatch):
     # main() exports defaults before exec; isolate that mutation in CPU tests.
     monkeypatch.setenv("GAME_REWARD_MODE", "legacy")
-    monkeypatch.setenv("TOPIC_PENALTY", "3")
-    monkeypatch.setenv("TOPIC_JUDGE_BACKEND", "anthropic")
+    monkeypatch.setenv("TOPIC_PENALTY", "2")
+    monkeypatch.setenv("TOPIC_JUDGE_BACKEND", "local")
     monkeypatch.setenv("TOPIC_API_PROVIDER", "anthropic")
     monkeypatch.setenv("TOPIC_API_BASE_URL", "https://api.anthropic.com")
     monkeypatch.setenv("TOPIC_API_MODEL", "claude-opus-5")
@@ -33,9 +33,11 @@ def test_new_container_recipe_defaults_to_shared_binary_reward(monkeypatch):
     monkeypatch.delenv("TOPIC_PENALTY", raising=False)
     env = entrypoint().environment()
     assert env["GAME_REWARD_MODE"] == "shared_binary"
-    assert env["TOPIC_PENALTY"] == "3"
-    assert env["TOPIC_JUDGE_BACKEND"] == "anthropic"
-    assert env["TOPIC_API_MODEL"] == "claude-opus-5"
+    assert env["TOPIC_PENALTY"] == "2"
+    assert env["TOPIC_JUDGE_BACKEND"] == "local"   # no credential needed; what the validated run used
+    # The local backend points the client at the base model behind the shim.
+    assert env["TOPIC_API_MODEL"] == "mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated"
+    assert env["TOPIC_API_PROVIDER"] == "openai_compatible"
 
 
 def entrypoint():
@@ -188,7 +190,8 @@ def test_the_hosted_judge_reserves_no_card(monkeypatch):
     monkeypatch.setenv("GAME_REWARD_MODE", "shared_binary")
     monkeypatch.setenv("TOPIC_JUDGE_BACKEND", "anthropic")
     monkeypatch.setenv("TOPIC_API_KEY", "private-test-key")
-    monkeypatch.delenv("TOPIC_JUDGE_GPU", raising=False)
+    for name in ("TOPIC_JUDGE_GPU", "TOPIC_JUDGE_MANAGED", "TOPIC_JUDGE_MAX_LEN"):
+        monkeypatch.delenv(name, raising=False)
     env = entrypoint().environment()
     assert "TOPIC_JUDGE_GPU" not in env
 
@@ -208,3 +211,36 @@ def test_the_placement_knobs_reach_the_container(tmp_path):
     args = json.loads(result.stdout)
     for name in ("TOPIC_JUDGE_GPU", "TOPIC_JUDGE_MAX_LEN", "JUDGE_GPU"):
         assert name in args, f"{name} is not forwarded into the container"
+
+
+def test_local_pipeline_matches_the_validated_a3_settings(monkeypatch):
+    """The container must train the way the 100-step A3 run actually trained."""
+    monkeypatch.setenv("GAME_REWARD_MODE", "shared_binary")
+    monkeypatch.setenv("TOPIC_JUDGE_BACKEND", "local")
+    for name in ("TOPIC_PENALTY", "TOPIC_JUDGE_GPU", "TOPIC_JUDGE_UTIL", "UTIL",
+                 "OPP_UTIL", "VLLM_SLEEP", "TOPIC_JUDGE_MAX_LEN"):
+        monkeypatch.delenv(name, raising=False)
+    env = entrypoint().environment()
+    # Measured on 4xH200, not estimated: judges ~17 GiB each on separate cards,
+    # engines resident, ~50s/step, off-topic 43% -> 87% against the control.
+    assert env["TOPIC_PENALTY"] == "2"
+    assert (env["UTIL"], env["OPP_UTIL"]) == ("0.28", "0.26")
+    assert env["VLLM_SLEEP"] == "0"      # sleeping costs ~110s/step and is not needed
+    assert env["TOPIC_JUDGE_UTIL"] == "0.13"
+    assert env["TOPIC_JUDGE_MAX_LEN"] == "4096"
+    assert env["GPUS"] == "4"
+
+
+def test_four_h200s_are_the_documented_default(tmp_path):
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    mock = binary / "docker"
+    mock.write_text(f"#!{sys.executable}\nimport sys, json\nprint(json.dumps(sys.argv[1:]))\n")
+    mock.chmod(0o755)
+    env = dict(os.environ, PATH=f"{binary}:{os.environ['PATH']}",
+               SSP_DOCKER_WORKSPACE=str(tmp_path / "workspace"))
+    env.pop("GPU_DEVICES", None)
+    result = subprocess.run(["bash", str(ROOT / "docker/run_llama8b.sh"), "psro"],
+                            env=env, text=True, capture_output=True, check=True)
+    args = json.loads(result.stdout)
+    assert args[args.index("--gpus") + 1] == '"device=0,1,2,3"'

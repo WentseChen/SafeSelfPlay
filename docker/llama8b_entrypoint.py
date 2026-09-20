@@ -49,8 +49,8 @@ def environment() -> dict[str, str]:
     )
     env["HF_HUB_CACHE"] = str(Path(env["HF_HOME"]) / "hub")
     for name, default in (("INIT_KL_COEF", "0"), ("OFFTOPIC_ENABLE", "0"),
-                          ("GAME_REWARD_MODE", "shared_binary"), ("TOPIC_PENALTY", "3"),
-                          ("TOPIC_JUDGE_BACKEND", "anthropic"), ("TOPIC_API_PROVIDER", "anthropic"),
+                          ("GAME_REWARD_MODE", "shared_binary"), ("TOPIC_PENALTY", "2"),
+                          ("TOPIC_JUDGE_BACKEND", "local"), ("TOPIC_API_PROVIDER", "anthropic"),
                           ("TOPIC_API_BASE_URL", "https://api.anthropic.com"),
                           ("TOPIC_API_MODEL", "claude-opus-5"),
                           ("PSRO_MIDRUN_RESUME", "0"), ("LADDER_EARLY_STOP", "1")):
@@ -78,10 +78,19 @@ def environment() -> dict[str, str]:
         # its own weights and died with "No available memory for the cache
         # blocks".  Keeping the two judges on separate cards is what makes four
         # GPUs enough.  Measured per judge on H200: ~17 GiB, 0.118 of a card.
-        for name, default in (("TOPIC_JUDGE_GPU", "3"), ("TOPIC_JUDGE_UTIL", "0.16"),
+        #
+        # These are the settings of the validated 100-step A3 run on 4xH200, not
+        # estimates. With the judge on its own card the trainable and opponent
+        # engines keep their proven 0.28 / 0.26 and the rollout engines stay
+        # resident: the earlier 0.24 / 0.22 + VLLM_SLEEP=1 existed only to make
+        # room for a judge believed to be stacked on GPU 0, and the sleep costs
+        # ~110s/step because deepspeed offloads optimizer state every step. The
+        # measured run held ~50s/step with VLLM_SLEEP=0 and never OOMed, on the
+        # same PSRO frozen-mixture shape this pipeline uses.
+        for name, default in (("TOPIC_JUDGE_GPU", "3"), ("TOPIC_JUDGE_UTIL", "0.13"),
                               ("TOPIC_JUDGE_MAX_LEN", "4096"),
-                              ("UTIL", "0.24"), ("OPP_UTIL", "0.22"),
-                              ("VLLM_SLEEP", "1")):
+                              ("UTIL", "0.28"), ("OPP_UTIL", "0.26"),
+                              ("VLLM_SLEEP", "0")):
             env.setdefault(name, default)
     else:
         env.pop("TOPIC_JUDGE_MANAGED", None)
@@ -187,8 +196,9 @@ def record_run_settings(args, env: dict[str, str]) -> None:
         "ATK_MIN_DELTA": "0.01", "ATK_PATIENCE": "3", "ATK_MIN_STEP": "60",
         "ATK_CEILING_MAX": "0.30", "DEF_THRESHOLD": "0.01", "DEF_GUARD_MIN": "0.912",
         "DEF_PATIENCE": "3", "DEF_MIN_STEP": "60",
-        "TOPIC_JUDGE_BACKEND": "anthropic", "TOPIC_LOCAL_MODEL": "",
-        "TOPIC_JUDGE_UTIL": "0.16", "UTIL": "0.28", "OPP_UTIL": "0.26",
+        "TOPIC_JUDGE_BACKEND": "local", "TOPIC_LOCAL_MODEL": "",
+        "TOPIC_JUDGE_UTIL": "0.13", "TOPIC_JUDGE_GPU": "3", "TOPIC_JUDGE_MAX_LEN": "4096",
+        "UTIL": "0.28", "OPP_UTIL": "0.26",
         "VLLM_SLEEP": "0",
     }
     recipe = {

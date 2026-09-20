@@ -136,14 +136,22 @@ bash docker/run_llama8b.sh build
 
 ## 2. 选择 label 模型：下面两种方式任选一种
 
-两种方式都使用 binary 标签：偏题 `true` 扣 3，不偏题 `false` 这一项为 0。
+两种方式都使用 binary 标签：偏题 `true` 扣 2，不偏题 `false` 这一项为 0。
 WildGuard 继续判断有害性、拒答；训练和 PSRO 矩阵共用
-`R_A=(r_A-r_D)/4-3*b`，`R_D=-R_A`。
+`R_A=(r_A-r_D)/4-2*b`，`R_D=-R_A`。
 
 ```bash
 export GAME_REWARD_MODE=shared_binary
-export TOPIC_PENALTY=3
+export TOPIC_PENALTY=2
 ```
+
+`TOPIC_PENALTY=2` 是当前默认值，也是下文所有示例使用的设置。取 2 的原因：
+未罚分的对局收益落在 `[-1, 1]`，罚 2 之后“偏题且赢”的收益 `1-2=-1` 与
+“不偏题且输”的 `-1` 相等，偏题不再占优；同时罚分项对 reward 方差的贡献与对局
+本身持平，而不是数倍于它。实测 100 步 A3：相对同步数无罚分对照，on-topic 由
+43% 升到 87%，攻击 reward 仍在上升。严格占优需要 `TOPIC_PENALTY > 2`。
+
+判定模型默认是 **方式 A（本地 Llama 8B abliterated）**，不需要任何 API key。
 
 ### 方式 A：用本地模型，不需要 Claude API key
 

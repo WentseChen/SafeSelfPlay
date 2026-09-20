@@ -53,14 +53,22 @@ vLLM 的旧版二进制依赖由基础镜像提供，请勿把它改成空白 Py
 
 ## 2. 选择 label 模型：下面两种方式任选一种
 
-两种方式都使用 binary 标签：偏题 `true` 扣 3，不偏题 `false` 这一项为 0。
+两种方式都使用 binary 标签：偏题 `true` 扣 2，不偏题 `false` 这一项为 0。
 WildGuard 继续判断有害性、拒答；训练和 PSRO 矩阵共用
-`R_A=(r_A-r_D)/4-3*b`，`R_D=-R_A`。
+`R_A=(r_A-r_D)/4-2*b`，`R_D=-R_A`。
 
 ```bash
 export GAME_REWARD_MODE=shared_binary
-export TOPIC_PENALTY=3
+export TOPIC_PENALTY=2
 ```
+
+`TOPIC_PENALTY=2` 是当前默认值，也是下文所有示例使用的设置。取 2 的原因：
+未罚分的对局收益落在 `[-1, 1]`，罚 2 之后“偏题且赢”的收益 `1-2=-1` 与
+“不偏题且输”的 `-1` 相等，偏题不再占优；同时罚分项对 reward 方差的贡献与对局
+本身持平，而不是数倍于它。实测 100 步 A3：相对同步数无罚分对照，on-topic 由
+43% 升到 87%，攻击 reward 仍在上升。严格占优需要 `TOPIC_PENALTY > 2`。
+
+判定模型默认是 **方式 A（本地 Llama 8B abliterated）**，不需要任何 API key。
 
 ### 方式 A：用本地模型，不需要 Claude API key
 
@@ -77,7 +85,11 @@ export RUN_LABELER=local
 即使 shell 留有旧 Claude 配置，本地模式也会覆盖接口与 key，避免调用云端。
 同一个本地服务贯穿全部训练阶段和 PSRO 矩阵计算，不会每个阶段换一次 label 模型。
 
-本地模型使用容器内 GPU 3，默认显存比例 0.16；训练仍使用四张卡，
+本地模型使用容器内 GPU 3（`TOPIC_JUDGE_GPU=3`），默认显存比例 0.13（实测约 17 GiB），上下文 4096；
+训练仍使用四张卡，显存预留与已验证的 A3 实验一致（`UTIL=0.28`、`OPP_UTIL=0.26`、`VLLM_SLEEP=0`），
+判定模型必须与 WildGuard 分卡：vLLM 的 `gpu_memory_utilization` 是整卡比例并会扣掉同卡上
+其它进程已占的显存，两个 judge 叠在一张卡上时第二个连权重都放不下，直接以
+`No available memory for the cache blocks` 退出。
 相应降低 rollout / opponent 的显存预留，并启用 rollout 引擎休眠。
 PSRO 算矩阵时，GPU 0 运行 WildGuard，GPU 1、2 运行两个 cell worker，GPU 3 保留给 label。
 自定义更大的模型需重新核对显存，当前默认预算按 8B 准备。
@@ -181,7 +193,7 @@ rollout batch 128、train batch 32、micro batch 8。PSRO 每个收益格 4000 �
 训练完成时共 81 格；两个 baseline 不在训练期间额外求解收益矩阵。
 因此轮数相同也不代表三种方法的总算力相同。
 
-**当前源码预设统一设置 `GAME_REWARD_MODE=shared_binary`、`TOPIC_PENALTY=3`、
+**当前源码预设统一设置 `GAME_REWARD_MODE=shared_binary`、`TOPIC_PENALTY=2`、
 `INIT_KL_COEF=0`、`OFFTOPIC_ENABLE=0`、`PSRO_MIDRUN_RESUME=0`。**
 当前 naive 继承权重的路径无法保持正 KL 惩罚始终参考 base，因此三组统一关闭 KL 惩罚；
 参考 KL 仍监控。偏题判定使用上方选定的本地模型或 Claude API；WildGuard 始终启用。
