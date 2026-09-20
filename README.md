@@ -84,9 +84,18 @@ API 必须返回 `{"off_topic": true}` 或 `{"off_topic": false}`；字符串 `"
 判定模型有两种后端，由 `TOPIC_JUDGE_BACKEND` 选择。两者使用同一套提示词、
 同一个客户端和同一份缓存，对 reward 而言可互换；区别只在召回率和成本。
 
-**默认：本地判定（`TOPIC_JUDGE_BACKEND=local`）。** `role_phase.sh` 在 GPU 0 上
-用 base model 起一个引擎，前面套 `scripts/slurm/serve_topic_judge.py` 提供的
-OpenAI 兼容接口。不需要 key，不需要外网，已发表的实验用的就是这一套：
+**默认：本地判定（`TOPIC_JUDGE_BACKEND=local`）。** `role_phase.sh` 用 base model
+起一个引擎，前面套 `scripts/slurm/serve_topic_judge.py` 提供的 OpenAI 兼容接口。
+不需要 key，不需要外网，已发表的实验用的就是这一套。
+
+判定引擎默认放在 WildGuard 的**下一张卡**（`JUDGE_GPU=0` → `TOPIC_JUDGE_GPU=1`），
+两个 judge 不共卡。这一点是必需的：vLLM 的 `gpu_memory_utilization` 是整张卡的
+比例，并且会扣掉同卡上其它进程已占用的显存，所以叠在同一张卡上时，看起来合理的
+`0.13 + 0.13` 会让第二个引擎连自己的权重都放不下，直接以
+`No available memory for the cache blocks` 退出。分卡之后 4 张 H200 就够用，
+不需要第 5 张卡。实测每个 judge 约 17 GiB / 143771 MiB，即一张卡的 0.118；
+`TOPIC_JUDGE_UTIL=0.13` 就是这个数加余量。启动后 role_phase.sh 会把每张卡的显存
+占用打进日志（`GPU memory after judges`），重新配比时以这个实测值为准：
 
 ```bash
 export GAME_REWARD_MODE=shared_binary
@@ -351,9 +360,12 @@ services. Prepared source, SFT files and model paths are still required.
 | --- | --- | --- |
 | `INIT_KL_COEF` | `0.01` | Base-model reverse-KL penalty for both roles; `0` disables it. |
 | `PSRO_MIDRUN_RESUME` | `0` with KL; `1` without | Continue a partial role's adapter; requires KL disabled and does not restore optimizer state. |
-| `TOPIC_JUDGE_BACKEND` | `local` | `local` runs the base model on GPU 0; `anthropic` calls the hosted judge. Only used with `GAME_REWARD_MODE=shared_binary`. |
+| `TOPIC_JUDGE_BACKEND` | `local` | `local` runs the base model on its own card; `anthropic` calls the hosted judge. Only used with `GAME_REWARD_MODE=shared_binary`. |
 | `TOPIC_API_MODEL` | `claude-opus-5` / `local-topic-judge` | Judge model; part of the cache key and the run contract. |
-| `TOPIC_JUDGE_UTIL` | `0.24` | Local topic judge's fraction of GPU 0, shared with WildGuard and training. |
+| `JUDGE_GPU` | `0` | Card WildGuard runs on. |
+| `TOPIC_JUDGE_GPU` | `(JUDGE_GPU + 1) % GPUS` | Card the local topic judge runs on. Keep it off WildGuard's card: a second engine on an occupied card must be given a fraction covering the first one's usage too, and `0.13 + 0.13` then starves it. A 1-GPU job falls back to sharing. |
+| `TOPIC_JUDGE_UTIL` | `0.13` | Local topic judge's fraction of its card. Measured footprint is ~17 GiB of 143771 MiB (0.118) on an H200. |
+| `TOPIC_JUDGE_MAX_LEN` | `4096` | Judge context. The prompt is a contract plus one seed and one rewrite and the verdict is capped at 24 tokens, so 8192 only cost ~4 GiB of KV. |
 | `TOPIC_JUDGE_PORT` | `JUDGE_PORT + 300` | Local topic judge port. |
 | `TOPIC_JUDGE_STARTUP_ATTEMPTS` | `90` | Health probes before failing the role; the label is required, so this does not fall back. |
 | `OFFTOPIC_ENABLE` | `0` | Start the superseded legacy verifier. Leave at `0`: it does not feed the shared reward and its 0.24 of GPU 0 overcommits the card. |

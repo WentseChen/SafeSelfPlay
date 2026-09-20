@@ -69,8 +69,19 @@ def environment() -> dict[str, str]:
         env.pop("TOPIC_API_KEY_FILE", None)
         # GPU 3 hosts the label model throughout training/matrix estimation.
         # Reduce colocated rollout reservations; PSRO cells use GPUs 1 and 2.
-        for name, default in (("TOPIC_JUDGE_UTIL", "0.16"), ("UTIL", "0.24"),
-                              ("OPP_UTIL", "0.22"), ("VLLM_SLEEP", "1")):
+        #
+        # TOPIC_JUDGE_GPU is what actually places it.  Until it existed the
+        # comment above was aspirational: role_phase.sh launched every judge on
+        # GPU 0, so the topic judge landed on top of WildGuard.  vLLM measures
+        # gpu_memory_utilization against the whole card and subtracts what other
+        # processes already hold, so the second engine was left less memory than
+        # its own weights and died with "No available memory for the cache
+        # blocks".  Keeping the two judges on separate cards is what makes four
+        # GPUs enough.  Measured per judge on H200: ~17 GiB, 0.118 of a card.
+        for name, default in (("TOPIC_JUDGE_GPU", "3"), ("TOPIC_JUDGE_UTIL", "0.16"),
+                              ("TOPIC_JUDGE_MAX_LEN", "4096"),
+                              ("UTIL", "0.24"), ("OPP_UTIL", "0.22"),
+                              ("VLLM_SLEEP", "1")):
             env.setdefault(name, default)
     else:
         env.pop("TOPIC_JUDGE_MANAGED", None)

@@ -165,3 +165,46 @@ def test_handoff_packaging_omits_untracked_caches_and_credentials(tmp_path):
         assert "uv.lock" not in names
         assert "docker/wandb.fixed.json" not in names
         assert not any(name.startswith(("output/", ".git/", ".env", "hf/")) for name in names)
+
+
+def test_local_judge_gets_a_card_of_its_own(monkeypatch):
+    # Both judges on one card is what made four GPUs look insufficient: vLLM
+    # charges the second engine for what the first already holds there, so it
+    # is left less memory than its own weights.
+    monkeypatch.setenv("GAME_REWARD_MODE", "shared_binary")
+    monkeypatch.setenv("TOPIC_JUDGE_BACKEND", "local")
+    for name in ("TOPIC_JUDGE_GPU", "JUDGE_GPU", "TOPIC_JUDGE_UTIL", "TOPIC_JUDGE_MAX_LEN"):
+        monkeypatch.delenv(name, raising=False)
+    env = entrypoint().environment()
+    assert env["GPUS"] == "4"
+    assert env["TOPIC_JUDGE_GPU"] != env.get("JUDGE_GPU", "0")
+    assert 0 <= int(env["TOPIC_JUDGE_GPU"]) < int(env["GPUS"])
+    # Measured: ~17 GiB of a 143771 MiB H200 per judge, i.e. 0.118 of a card.
+    assert 0.118 < float(env["TOPIC_JUDGE_UTIL"]) <= 0.20
+    assert env["TOPIC_JUDGE_MAX_LEN"] == "4096"
+
+
+def test_the_hosted_judge_reserves_no_card(monkeypatch):
+    monkeypatch.setenv("GAME_REWARD_MODE", "shared_binary")
+    monkeypatch.setenv("TOPIC_JUDGE_BACKEND", "anthropic")
+    monkeypatch.setenv("TOPIC_API_KEY", "private-test-key")
+    monkeypatch.delenv("TOPIC_JUDGE_GPU", raising=False)
+    env = entrypoint().environment()
+    assert "TOPIC_JUDGE_GPU" not in env
+
+
+def test_the_placement_knobs_reach_the_container(tmp_path):
+    binary = tmp_path / "bin"
+    binary.mkdir()
+    mock = binary / "docker"
+    mock.write_text(f"#!{sys.executable}\nimport sys, json\nprint(json.dumps(sys.argv[1:]))\n")
+    mock.chmod(0o755)
+    env = dict(os.environ, PATH=f"{binary}:{os.environ['PATH']}",
+               SSP_DOCKER_WORKSPACE=str(tmp_path / "workspace"), DRY_RUN="1",
+               TOPIC_JUDGE_BACKEND="local", TOPIC_JUDGE_GPU="3",
+               TOPIC_JUDGE_MAX_LEN="4096", JUDGE_GPU="0")
+    result = subprocess.run(["bash", str(ROOT / "docker/run_llama8b.sh"), "psro"],
+                            env=env, text=True, capture_output=True, check=True)
+    args = json.loads(result.stdout)
+    for name in ("TOPIC_JUDGE_GPU", "TOPIC_JUDGE_MAX_LEN", "JUDGE_GPU"):
+        assert name in args, f"{name} is not forwarded into the container"

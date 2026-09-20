@@ -92,6 +92,37 @@ UTIL=${UTIL:-0.28}
 OPP_UTIL=${OPP_UTIL:-0.26}
 JUDGE_UTIL=${JUDGE_UTIL:-0.13}
 
+# Which physical GPU the judges (WildGuard, and the local topic judge) run on.
+# 0 colocates them with the trainable engines, which is what every run before
+# the topic judge did and what the budget above is measured for.  That budget
+# has no room for a second 8B judge: 0.13 + 0.28 + 0.26 + 0.24 = 0.91 leaves
+# the ZeRO-3 actor ~0.09 and the run dies with "No available memory for the
+# cache blocks".  Allocate one extra card (--gres one above GPUS) and set
+# JUDGE_GPU to it: ray is started with --num-gpus=$GPUS so it never hands that
+# card out, and both judges then have it to themselves.
+JUDGE_GPU=${JUDGE_GPU:-0}
+
+# Which card the local topic judge runs on.  Give it a DIFFERENT card from
+# WildGuard rather than stacking both on GPU 0: vLLM's gpu_memory_utilization
+# is measured against the whole card and it subtracts what other processes
+# already hold there, so a second engine on the same card must be given a
+# fraction that covers the first one's usage as well.  Stacking WildGuard
+# (0.35 -> 49G, 269k KV tokens) and the topic judge (0.45 -> 63G budget) left
+# the topic judge 14G for 16G of weights and it died with "No available memory
+# for the cache blocks".  One judge per card keeps every fraction incremental.
+# Default to the card after WildGuard's, so the two judges never share one: a
+# second engine on an occupied card must be given a fraction covering the first
+# one's usage as well, and the natural-looking 0.13 + 0.13 then starves it.  A
+# single-GPU job has nowhere else to put it and falls back to sharing.
+if [ "${GPUS:-4}" -gt 1 ]; then
+  TOPIC_JUDGE_GPU=${TOPIC_JUDGE_GPU:-$(( (JUDGE_GPU + 1) % GPUS ))}
+else
+  TOPIC_JUDGE_GPU=${TOPIC_JUDGE_GPU:-$JUDGE_GPU}
+fi
+# Judge prompts are the contract plus one seed and one rewrite, and the reply
+# is capped at 24 tokens, so 8192 buys nothing over 4096 and costs 4G of KV.
+TOPIC_JUDGE_MAX_LEN=${TOPIC_JUDGE_MAX_LEN:-4096}
+
 # --- throughput ---------------------------------------------------------------
 # Generation is ~93% of a step, so engine-side overhead dominates and spare HBM
 # buys nothing (385-token prompts, ~120-token responses). Measured per step on
@@ -178,11 +209,16 @@ OFFTOPIC_ENABLE=${OFFTOPIC_ENABLE:-0}
 OFFTOPIC_PORT=${OFFTOPIC_PORT:-$((JUDGE_PORT + 200))}
 OFFTOPIC_UTIL=${OFFTOPIC_UTIL:-0.24}
 # Which labeler answers "does this rewrite still ask what the seed asked?" in
-# GAME_REWARD_MODE=shared_binary.  `local` runs the base model on GPU 0 behind
-# an OpenAI-compatible shim and needs no credential; `anthropic` calls Opus 5.
+# GAME_REWARD_MODE=shared_binary.  `local` runs the base model behind an
+# OpenAI-compatible shim and needs no credential; `anthropic` calls Opus 5.
 TOPIC_JUDGE_BACKEND=${TOPIC_JUDGE_BACKEND:-local}
 TOPIC_JUDGE_PORT=${TOPIC_JUDGE_PORT:-$((JUDGE_PORT + 300))}
-TOPIC_JUDGE_UTIL=${TOPIC_JUDGE_UTIL:-0.24}
+# Measured on H200-143771MiB with 4 GPUs, one judge per card: WildGuard and the
+# topic judge each occupy 16995 and 16959 MiB, i.e. 0.118 of a card.  0.13 is
+# that plus headroom, and matches JUDGE_UTIL, which has carried WildGuard since
+# the first run.  The old 0.24 dates from the superseded verifier and is what
+# made the card overflow when it was stacked on top of WildGuard.
+TOPIC_JUDGE_UTIL=${TOPIC_JUDGE_UTIL:-0.13}
 RAY_PORT=${RAY_PORT:-6100}
 RM_URL=http://$IP:$JUDGE_PORT/classify
 cd "$WORK"
@@ -412,7 +448,7 @@ trap 'exit 143' TERM
 # The judge shares GPU 0: it is idle for most of a step, so a whole card is
 # waste. --max_len must stay at the upstream 8192; at 4096 a long transcript
 # returns 500 and takes the whole server down mid-run.
-CUDA_VISIBLE_DEVICES=0 RAY_TMPDIR=/tmp/ssp-judge-$JUDGE_PORT \
+CUDA_VISIBLE_DEVICES="$JUDGE_GPU" RAY_TMPDIR=/tmp/ssp-judge-$JUDGE_PORT \
 setsid "$PY" -m openrlhf.cli.serve_wildguard \
   --model_path "$JUDGE" --port "$JUDGE_PORT" --host "$IP" --bf16 \
   --num_gpus 1 --tensor_parallel_size 1 --enforce_eager --seed 42 \
@@ -453,8 +489,8 @@ if [ "${GAME_REWARD_MODE:-legacy}" = shared_binary ]; then
       if [ "${TOPIC_JUDGE_MANAGED:-0}" = 1 ]; then
         echo "$TAG reusing managed local topic judge: $TOPIC_API_MODEL"
       else
-        CUDA_VISIBLE_DEVICES=0 TOPIC_JUDGE_MODEL="$BASE" TOPIC_JUDGE_PORT="$TOPIC_JUDGE_PORT" \
-        TOPIC_JUDGE_UTIL="$TOPIC_JUDGE_UTIL" \
+        CUDA_VISIBLE_DEVICES="$TOPIC_JUDGE_GPU" TOPIC_JUDGE_MODEL="$BASE" TOPIC_JUDGE_PORT="$TOPIC_JUDGE_PORT" \
+        TOPIC_JUDGE_UTIL="$TOPIC_JUDGE_UTIL" TOPIC_JUDGE_MAX_LEN="$TOPIC_JUDGE_MAX_LEN" \
         setsid "$PY" "$SSP_REPO/scripts/slurm/serve_topic_judge.py" \
           > "$OUT/topic_judge.log" 2>&1 &
         TOPIC_JUDGE_PID=$!
@@ -478,9 +514,15 @@ if [ "${GAME_REWARD_MODE:-legacy}" = shared_binary ]; then
   esac
   # Fails fast on a bad URL, model or key, and prints the judge identity that
   # goes into the cache key and the run contract.
+  # Per-card memory once the judges are resident and before ray claims
+  # anything.  Rebalancing UTIL/OPP_UTIL/JUDGE_UTIL is guesswork without this:
+  # vLLM charges each engine for what the whole card already holds.
+  echo "$TAG GPU memory after judges (MiB used/total):"
+  nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader \
+    | sed "s/^/$TAG   gpu /" || true
   "$PY" -c 'import json;from roll.utils.topic_api import topic_api_contract;print("topic judge contract:",json.dumps(topic_api_contract(),sort_keys=True))'
 elif [ "$OFFTOPIC_ENABLE" = 1 ]; then
-  CUDA_VISIBLE_DEVICES=0 OFFTOPIC_MODEL="$BASE" OFFTOPIC_PORT="$OFFTOPIC_PORT" \
+  CUDA_VISIBLE_DEVICES="$JUDGE_GPU" OFFTOPIC_MODEL="$BASE" OFFTOPIC_PORT="$OFFTOPIC_PORT" \
   OFFTOPIC_UTIL="$OFFTOPIC_UTIL" \
   setsid "$PY" "$SSP_REPO/scripts/slurm/serve_offtopic.py" \
     > "$OUT/offtopic.log" 2>&1 &
