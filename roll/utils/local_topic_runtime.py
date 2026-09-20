@@ -51,8 +51,24 @@ def wait_for_topic_service(process, env: dict[str, str], log_path: Path) -> None
 def run_with_local_topic(command: list[str], env: dict[str, str], repo: Path) -> int:
     """Own the judge and trainer process groups, including failure and shutdown."""
     port = int(env["TOPIC_JUDGE_PORT"])
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", port))
+    # Probing first is deliberate: starting a second judge on an occupied port
+    # would silently hand the run whatever already answers there, and a stale
+    # judge from a crashed run answers the same contract with different weights.
+    # The bare OSError this used to raise ("[Errno 98] Address already in use")
+    # says nothing about which port, what is holding it, or how to proceed --
+    # and the container always uses the same default, so the first thing anyone
+    # hits after a crashed run is exactly this.
+    try:
+        with socket.socket() as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind(("127.0.0.1", port))
+    except OSError as exc:
+        raise RuntimeError(
+            f"Topic judge port {port} is already in use ({exc.strerror}). A judge from an "
+            f"earlier run is probably still holding it; stop it, or set TOPIC_JUDGE_PORT to "
+            f"a free port. Never point this at a service you did not start: the label model "
+            f"is part of the run contract."
+        ) from exc
     log_path = Path(env["SSP_ROOT"]) / "topic_judge.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     service = trainer = None
