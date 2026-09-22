@@ -1143,8 +1143,17 @@ def main() -> int:
         # error" at init. Mirror role_phase.sh's measured budget instead.
         service_env.setdefault("TOPIC_JUDGE_UTIL", "0.13")
         service_env.setdefault("TOPIC_JUDGE_MAX_LEN", "4096")
-        judge_gpu = int(os.environ.get("JUDGE_GPU", "0"))
-        service_env.setdefault("TOPIC_JUDGE_GPU", str((judge_gpu + 1) % max(cfg.gpus, 1)))
+        # Cell workers occupy GPUs 1..cell_workers and the cell judge takes GPU
+        # 0, so the run-scoped judge has to come off the end and the worker
+        # count has to shrink by one -- otherwise the judge's ~18 GiB sits on a
+        # cell worker's card and the cell dies with a plain CUDA OOM. The
+        # container's entrypoint already does exactly this (cell-workers 2 when
+        # a judge is managed, judge on GPU 3); the bare path did not.
+        service_env.setdefault("TOPIC_JUDGE_GPU", str(max(cfg.gpus - 1, 0)))
+        if cfg.cell_workers > cfg.gpus - 2:
+            log(f"run-scoped judge on GPU {cfg.gpus - 1}: cell workers "
+                f"{cfg.cell_workers} -> {cfg.gpus - 2}")
+            cfg.cell_workers = max(cfg.gpus - 2, 1)
         judge_context = local_topic_service(service_env, SLURM_DIR.parent.parent)
         log(f"run-scoped topic judge on :{service_env['TOPIC_JUDGE_PORT']} "
             f"(GPU {service_env.get('TOPIC_JUDGE_GPU', '3')})")

@@ -175,5 +175,18 @@ def test_the_run_scoped_judge_uses_the_colocated_budget():
     block = block[:block.index("actions = 0")]
     assert 'setdefault("TOPIC_JUDGE_UTIL", "0.13")' in block
     assert 'setdefault("TOPIC_JUDGE_MAX_LEN", "4096")' in block
-    # and it must not land on WildGuard's card
-    assert 'TOPIC_JUDGE_GPU' in block and '(judge_gpu + 1)' in block
+    # and it must not land on WildGuard's card (GPU 0)
+    assert 'TOPIC_JUDGE_GPU' in block and 'cfg.gpus - 1' in block
+
+
+def test_the_run_scoped_judge_does_not_sit_on_a_cell_worker_card():
+    """Cell workers take GPUs 1..cell_workers and the cell judge takes GPU 0.
+    A judge left on GPU 1 puts ~18 GiB on a cell worker's card, and the cell
+    dies with a plain CUDA OOM that names neither the judge nor the layout.
+    The container's entrypoint already drops to 2 cell workers with the judge
+    on GPU 3; the bare driver has to do the same."""
+    driver = Path("scripts/slurm/cold_psro_local.py").read_text()
+    block = driver[driver.index("local_topic_service"):]
+    block = block[:block.index("actions = 0")]
+    assert 'TOPIC_JUDGE_GPU", str(max(cfg.gpus - 1, 0))' in block
+    assert "cfg.cell_workers = max(cfg.gpus - 2, 1)" in block
