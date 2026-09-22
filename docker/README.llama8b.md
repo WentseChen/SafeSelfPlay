@@ -7,7 +7,7 @@
 该版本由老师执行 `build` 下载依赖与上游数据，再执行 `prepare` 下载模型；
 源码包的 `START_HERE.md` 已按此顺序编排。下文的完整镜像导入方式适用于另行收到 `.image.tar.gz` 的情况。
 
-本次交付基于最新 `90517bb`，包含训练与矩阵共用的 binary 偏题 reward（`-3/0`），
+本次交付包含最新主分支的训练与矩阵共用 binary 偏题 reward（默认 `-2/0`），
 并适配 Claude Opus 5 的短 JSON 标签请求。先看包内 `START_HERE.md`，
 其中先选择本地模型或 Opus API 做 label，再执行三个训练命令。
 
@@ -15,6 +15,7 @@
 镜像标签为 `safeselfplay:llama8b-h200-labels-20260920`，包含最新程序和已准备的上游补丁。
 预制镜像复用此前已通过检查的 CUDA / vLLM 层，其构建和测试记录见镜像交付目录的 `BUILD_VALIDATION.json`。
 源码构建版在老师的服务器安装依赖并执行检查，实际版本写入镜像内 `/opt/runtime-packages.txt`。
+构建脚本将 Git 提交写入 OCI `org.opencontainers.image.revision` 标签，便于核对重建结果。
 
 ## Docker 是什么
 
@@ -108,7 +109,6 @@ export RUN_LABELER=local
 判定模型必须与 WildGuard 分卡：vLLM 的 `gpu_memory_utilization` 是整卡比例并会扣掉同卡上
 其它进程已占的显存，两个 judge 叠在一张卡上时第二个连权重都放不下，直接以
 `No available memory for the cache blocks` 退出。
-相应降低 rollout / opponent 的显存预留，并启用 rollout 引擎休眠。
 PSRO 算矩阵时，GPU 0 运行 WildGuard，GPU 1、2 运行两个 cell worker，GPU 3 保留给 label。
 自定义更大的模型需重新核对显存，当前默认预算按 8B 准备。
 日志在持久化目录的 `topic_judge.log`，退出时自动清理该服务。
@@ -138,18 +138,19 @@ export TOPIC_API_KEY
 本地模型与 Claude 的判定质量可能不同，相同 reward 公式不表示标签相同。
 
 Hugging Face token 需要具备 WildGuard 的访问权限；先在其模型页面接受访问条款。
-本次老师专用交付包已按要求固定原 W&B 配置，无需再导出 W&B key：
+镜像不包含 API key，Docker 构建也会排除历史私有文件 `docker/wandb.fixed.json`。
+训练前在宿主机配置下列变量，启动脚本会将它们传入容器：
 
-| 字段 | 固定值 |
-| --- | --- |
-| Entity | `2373025856w-the-university-of-hong-kong` |
-| Project | `self-play` |
-| Group | `upstream-selfredteam-role-lora-v2` |
-| API key | 内置于 `docker/wandb.fixed.json`，不在文档中显示 |
+```bash
+read -rsp 'W&B API key: ' WANDB_API_KEY; echo
+export WANDB_API_KEY
+read -rp 'W&B entity: ' WANDB_ENTITY
+export WANDB_ENTITY
+export WANDB_PROJECT=self-play
+export WANDB_GROUP=upstream-selfredteam-role-lora-v2
+export WANDB_MODE=online
+```
 
-该文件随专用包和镜像交付，但被 `.gitignore` 排除。普通 Git checkout 不含凭据，
-可另设环境变量；有固定配置文件时，其 key/entity/project/group 优先，W&B 使用 online 模式。
-GitHub 版本的 W&B 配置命令见 [源码 Quick Start 第 3 节](QUICKSTART.source.llama8b.md#3-下载训练模型并检查环境)。
 三个方法各角色使用独立 run name；由名称生成稳定 run ID，重启沿用原 run。
 每步日志、表格，以及 eval 每 10 step、从第 50 step 开始的节奏沿用原训练器。
 
@@ -162,7 +163,7 @@ export GPU_DEVICES=0,1,2,3
 read -rsp 'HF token: ' HF_TOKEN; echo
 export HF_TOKEN
 
-# 老师专用包已包含固定 W&B 配置，不需要再设置 WANDB_API_KEY。
+# W&B 凭据使用上面设置的运行时环境变量。
 
 bash docker/run_llama8b.sh prepare
 bash docker/run_llama8b.sh check
@@ -302,10 +303,7 @@ docker stop -t 180 ssp-psro8
 
 **构建源码包**：把本包发给老师，解压后按第 1–3 节操作。包含代码和启动说明，
 不包含模型权重、HF token、本机缓存或历史训练 checkpoint。
-**本次老师专用包按要求包含固定 W&B key。**
-重新生成同样的专用包使用
-`python3 docker/package_llama8b.py --include-wandb --output /path/new.build.tar.gz`。
-GitHub 分发应省略 `--include-wandb`，并选择源码构建指南：
+GitHub 分发不包含凭据，使用以下命令生成源码构建包：
 
 ```bash
 python3 docker/package_llama8b.py --source-only-guide --output output/public-source.build.tar.gz

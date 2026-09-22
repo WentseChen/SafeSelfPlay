@@ -7,6 +7,7 @@ import inspect
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -45,6 +46,26 @@ def entrypoint():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_baked_image_defaults_use_the_current_local_recipe(monkeypatch):
+    # Docker ENV overrides setdefault() in the entrypoint. Exercise the actual
+    # baked environment so an old image default cannot silently win.
+    dockerfile = (ROOT / "docker/Dockerfile.llama8b").read_text().replace("\\\n", " ")
+    with monkeypatch.context() as image_env:
+        for key in list(os.environ):
+            image_env.delenv(key)
+        for line in dockerfile.splitlines():
+            if line.startswith("ENV "):
+                for assignment in shlex.split(line[4:]):
+                    key, value = assignment.split("=", 1)
+                    image_env.setenv(key, value)
+        env = entrypoint().environment()
+    assert env["TOPIC_JUDGE_BACKEND"] == "local"
+    assert env["TOPIC_PENALTY"] == "2"
+    assert env["TOPIC_JUDGE_GPU"] == "3"
+    assert env["TOPIC_JUDGE_UTIL"] == "0.13"
+    assert (env["UTIL"], env["OPP_UTIL"], env["VLLM_SLEEP"]) == ("0.28", "0.26", "0")
 
 
 @pytest.mark.parametrize("method,rounds,script", [

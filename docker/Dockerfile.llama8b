@@ -38,7 +38,8 @@ COPY README.md EXPERIMENTS.md ./
 # the commit lets `check` say which code is actually inside.
 ARG SSP_GIT_SHA=unknown
 ARG SSP_BUILD_DATE=unknown
-LABEL org.opencontainers.image.revision="$SSP_GIT_SHA" \
+LABEL org.opencontainers.image.source="https://github.com/xudongwu-0/SafeSelfPlay" \
+      org.opencontainers.image.revision="$SSP_GIT_SHA" \
       org.opencontainers.image.created="$SSP_BUILD_DATE" \
       org.opencontainers.image.title="SafeSelfPlay Llama-3.1-8B role-LoRA (4xH200)"
 RUN printf 'git_sha=%s\nbuild_date=%s\n' "$SSP_GIT_SHA" "$SSP_BUILD_DATE" \
@@ -62,8 +63,8 @@ ENV SSP_ROOT=/workspace \
     WANDB_DIR=/workspace/wandb \
     OFFTOPIC_ENABLE=0 \
     GAME_REWARD_MODE=shared_binary \
-    TOPIC_PENALTY=3 \
-    TOPIC_JUDGE_BACKEND=anthropic \
+    TOPIC_PENALTY=2 \
+    TOPIC_JUDGE_BACKEND=local \
     TOPIC_API_PROVIDER=anthropic \
     TOPIC_API_BASE_URL=https://api.anthropic.com \
     TOPIC_API_MODEL=claude-opus-5 \

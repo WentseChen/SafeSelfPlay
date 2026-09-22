@@ -14,10 +14,15 @@ case "$ACTION" in
     # Stamp the commit being baked in. Without it a rebuilt image and a stale
     # one look identical, and the stale one reintroduces the bugs it was built
     # before -- the code is COPYed into the image, never mounted.
-    SHA=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)
-    if ! git -C "$REPO" diff --quiet HEAD 2>/dev/null; then SHA="$SHA-dirty"; fi
+    REVISION=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)
+    if [ "$REVISION" = unknown ] && [ -f "$REPO/BUILD_BUNDLE.json" ]; then
+      BUNDLE_REVISION=$(sed -n 's/.*"base_git_commit": "\([0-9a-f]*\)".*/\1/p' "$REPO/BUILD_BUNDLE.json")
+      if [ -n "$BUNDLE_REVISION" ]; then REVISION=$BUNDLE_REVISION; fi
+    fi
+    if git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1 &&
+       ! git -C "$REPO" diff --quiet HEAD; then REVISION="$REVISION-dirty"; fi
     exec docker build --platform linux/amd64 -f "$REPO/docker/Dockerfile.llama8b" \
-      --build-arg "SSP_GIT_SHA=$SHA" \
+      --build-arg "SSP_GIT_SHA=$REVISION" \
       --build-arg "SSP_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
       -t "$IMAGE" "$@" "$REPO" ;;
   prepare|check|psro|uniform|naive|role) ;;
@@ -58,7 +63,7 @@ for name in HF_TOKEN WANDB_API_KEY WANDB_ENTITY WANDB_PROJECT WANDB_GROUP WANDB_
             OPPONENT OPPONENT_POOL_JSON START_ADAPTER HF_HUB_OFFLINE; do
   if [[ -v $name ]]; then OPTIONS+=(-e "$name"); fi
 done
-if [ "${TOPIC_JUDGE_BACKEND:-anthropic}" != local ] && [ -n "${TOPIC_API_KEY_FILE:-}" ]; then
+if [ "${TOPIC_JUDGE_BACKEND:-local}" != local ] && [ -n "${TOPIC_API_KEY_FILE:-}" ]; then
   [ -f "$TOPIC_API_KEY_FILE" ] || { echo "TOPIC_API_KEY_FILE is not a regular file" >&2; exit 2; }
   KEY_FILE=$(realpath "$TOPIC_API_KEY_FILE")
   OPTIONS+=(--mount "type=bind,source=$KEY_FILE,target=/run/secrets/topic_api_key,readonly"

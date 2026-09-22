@@ -46,11 +46,16 @@ def compute_zero_sum_psro_reward(
     *,
     prompt_type: str,
     labels: Mapping[str, Any],
+    attacker_cot_format_violation: bool,
+    defender_cot_format_violation: bool | None = None,
 ) -> dict[str, Any]:
     """Project one terminal general-sum outcome to an exact zero-sum payoff.
 
-    Let ``r_A`` and ``r_D`` be the existing role rewards after removing the
-    private CoT-format components. Both have fixed theoretical bounds [-2, 2].
+    Let ``r_A`` and ``r_D`` be the existing role rewards. In
+    ``GAME_REWARD_MODE=shared_binary`` they keep every component including CoT
+    format, so both are bounded by [-3, 3] and the topic penalty is applied on
+    top. The legacy projection below still removes the CoT-format components,
+    leaving both in [-2, 2].
     The matrix payoff is ``u_A = (r_A - r_D) / 4`` and ``u_D = -u_A``.
     A benign seed rewritten into a harmful prompt is dropped so that changing
     the task label cannot become an attacker shortcut. Other terminal outcomes
@@ -59,7 +64,11 @@ def compute_zero_sum_psro_reward(
 
     if shared_game_reward_enabled():
         try:
-            return compute_shared_game_reward(prompt_type=prompt_type, labels=labels)
+            return compute_shared_game_reward(
+                prompt_type=prompt_type, labels=labels,
+                attacker_cot_format_violation=attacker_cot_format_violation,
+                defender_cot_format_violation=defender_cot_format_violation,
+            )
         except InvalidGame as exc:
             raise ZeroSumEpisodeDrop(exc.reason) from exc
 
@@ -136,6 +145,12 @@ def rescore_zero_sum_episodes(
             compute_zero_sum_psro_reward(
                 prompt_type=str(source.get("prompt_type", "")),
                 labels=labels,
+                attacker_cot_format_violation=bool(
+                    source.get("attacker_cot_format_violation", False)
+                ),
+                defender_cot_format_violation=source.get(
+                    "defender_cot_format_violation"
+                ),
             )
         )
         rescored.append(row)
@@ -182,6 +197,12 @@ def assemble_valid_zero_sum_prefix(
             score = compute_zero_sum_psro_reward(
                 prompt_type=prompt_type,
                 labels=labels,
+                attacker_cot_format_violation=bool(
+                    source.get("attacker_cot_format_violation", False)
+                ),
+                defender_cot_format_violation=source.get(
+                    "defender_cot_format_violation"
+                ),
             )
         except ZeroSumEpisodeDrop as drop:
             dropped_by_reason[drop.reason] = (

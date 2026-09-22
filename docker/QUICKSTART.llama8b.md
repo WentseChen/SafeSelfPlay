@@ -1,6 +1,6 @@
 # Llama 8B / 4×H200：本地模型 / Claude Opus 5 label 与三组训练
 
-本包基于 `90517bb`，包含 Opus 5 的短标签请求适配。训练模型是
+本包包含本地判定模型分卡、默认偏题惩罚 2 和端口冲突检查。训练模型是
 `mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated`；label 模型只负责偏题判定，训练过程中保持冻结。
 在 Linux 4×H200 服务器的 **Bash** 中执行；Mac 只用于下载和转交文件。
 
@@ -143,8 +143,8 @@ export RUN_LABELER=local
 即使 shell 留有旧 Claude 配置，本地模式也会覆盖接口与 key，避免调用云端。
 同一个本地服务贯穿全部训练阶段和 PSRO 矩阵计算，不会每个阶段换一次 label 模型。
 
-本地模型使用容器内 GPU 3，默认显存比例 0.16；训练仍使用四张卡，
-相应降低 rollout / opponent 的显存预留，并启用 rollout 引擎休眠。
+本地模型使用容器内 GPU 3，默认显存比例 0.13、上下文 4096；训练仍使用四张卡，
+rollout / opponent 显存比例为 0.28 / 0.26，rollout 引擎不休眠。
 PSRO 算矩阵时，GPU 0 运行 WildGuard，GPU 1、2 运行两个 cell worker，GPU 3 保留给 label。
 自定义更大的模型需重新核对显存，当前默认预算按 8B 准备。
 日志在持久化目录的 `topic_judge.log`，退出时自动清理该服务。
@@ -184,8 +184,8 @@ bash docker/run_llama8b.sh check
 
 HF token 需有 `allenai/wildguard` 的访问权限。`prepare` 不使用 GPU；`check`
 检查配置、模型缓存和四张 GPU，不会启动本地 label 引擎或调用 Claude API。
-老师专用私有包保留原固定 W&B 配置，无需另行设置。GitHub checkout 不含 key，
-从仓库构建时按 [源码 Quick Start](QUICKSTART.source.llama8b.md) 第 3 节设置 W&B。
+当前镜像与 GitHub checkout 均不含 key，
+训练前按 [源码 Quick Start](QUICKSTART.source.llama8b.md) 第 3 节设置 W&B。
 
 ## 4. 三个训练命令
 

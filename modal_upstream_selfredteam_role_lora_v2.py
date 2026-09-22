@@ -372,9 +372,22 @@ def _patch_asymmetric_label_drift_training() -> None:
 
             shared_score = None
             if shared_game_reward_enabled() and game["prompt_type"] in {"generated_harmful", "generated_benign"}:
+                # The CoT-format component is part of this reward, so the real
+                # per-role violations have to reach it. Passing nothing made the
+                # attacker's component a constant +1 and dropped the defender's
+                # entirely, so format was unconstrained during training even
+                # though the contract advertised format_reward: true.
+                _violations = {}
+                for _entry in game["processed_output_history"]:
+                    _states = _entry.get("game_states") or {}
+                    _role = _states.get("game_role")
+                    if _role in ("attacker", "defender"):
+                        _violations[_role] = _states.get("cot_format_violation")
                 try:
                     shared_score = compute_shared_game_reward(
                         prompt_type=game["prompt_type"], labels=labels,
+                        attacker_cot_format_violation=bool(_violations.get("attacker") or False),
+                        defender_cot_format_violation=_violations.get("defender"),
                     )
                 except InvalidGame:
                     # The same invalid games are omitted by matrix estimation.

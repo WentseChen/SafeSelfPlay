@@ -1,7 +1,7 @@
 # 源码构建版：Llama 8B / 4×H200
 
-这是 Docker **源码构建流程**，支持 GitHub checkout 和源码小包，基于 `90517bb` 加本地 / Claude label 支持。
-包含源码、Dockerfile、运行脚本和少量项目数据。GitHub 版本不含 API key；老师专用私有包可包含固定 W&B 配置。
+这是 Docker **源码构建流程**，支持 GitHub checkout 和源码小包，使用当前主分支的本地 / Claude label 实现。
+包含源码、Dockerfile、运行脚本和少量项目数据。镜像构建排除 API key，凭据通过运行时环境变量传入。
 运行依赖、其余上游训练数据和模型权重由老师的服务器下载。
 
 训练模型：`mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated`。按顺序执行：**联网构建 → 选择 label → 下载模型 → 三组训练**。
@@ -168,8 +168,8 @@ export RUN_LABELER=local
 即使 shell 留有旧 Claude 配置，本地模式也会覆盖接口与 key，避免调用云端。
 同一个本地服务贯穿全部训练阶段和 PSRO 矩阵计算，不会每个阶段换一次 label 模型。
 
-本地模型使用容器内 GPU 3，默认显存比例 0.16；训练仍使用四张卡，
-相应降低 rollout / opponent 的显存预留，并启用 rollout 引擎休眠。
+本地模型使用容器内 GPU 3，默认显存比例 0.13、上下文 4096；训练仍使用四张卡，
+rollout / opponent 显存比例为 0.28 / 0.26，rollout 引擎不休眠。
 PSRO 算矩阵时，GPU 0 运行 WildGuard，GPU 1、2 运行两个 cell worker，GPU 3 保留给 label。
 自定义更大的模型需重新核对显存，当前默认预算按 8B 准备。
 日志在持久化目录的 `topic_judge.log`，退出时自动清理该服务。
@@ -221,8 +221,8 @@ export WANDB_GROUP=upstream-selfredteam-role-lora-v2
 export WANDB_MODE=online
 ```
 
-收到老师专用私有包且其中有 `docker/wandb.fixed.json` 时，固定配置优先，无需上述设置。
-如果不使用 W&B，可显式设置 `WANDB_MODE=disabled` 并清除 `WANDB_API_KEY`；私有固定配置仍会优先启用 online。
+Docker 构建会排除历史私有文件 `docker/wandb.fixed.json`，请使用上述运行时配置。
+如果不使用 W&B，可显式设置 `WANDB_MODE=disabled` 并清除 `WANDB_API_KEY`。
 
 ## 4. 三个训练命令
 

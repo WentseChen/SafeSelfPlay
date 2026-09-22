@@ -1,5 +1,5 @@
 # Only send training sources; exclude caches, checkpoints and virtualenvs.
-# The private teacher handoff intentionally includes docker/wandb.fixed.json.
+# Credentials are supplied at runtime, including for GitHub-hosted images.
 **
 !/*.py
 !/README.md
@@ -22,3 +22,4 @@
 **/.env.*
 **/*.log
 **/.git
+docker/wandb.fixed.json
