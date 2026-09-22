@@ -24,6 +24,7 @@ from cold_psro_local import Config, early_stop_configuration, make_local_oracle_
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from roll.utils.history_selfplay import history_schedule
 from roll.utils.shared_game_reward import shared_game_reward_enabled, shared_game_reward_contract
+from roll.utils.topic_api import configure_local_topic_backend
 from roll.utils.role_lora_cold_psro import opponent_pool
 
 
@@ -54,6 +55,9 @@ def run_baseline(psro: Any, cfg: Any, train: Any, *, method: str, rounds: int, s
     }
     recipe = {key: os.environ.get(key, default) for key, default in recipe_defaults.items()}
     if shared_game_reward_enabled():
+        # role_phase.sh configures the local judge, but it runs after this
+        # recipe is recorded; without this the baseline dies before training.
+        configure_local_topic_backend()
         recipe["shared_game_reward"] = shared_game_reward_contract()
     recipe["PSRO_MIDRUN_RESUME"] = os.environ.get(
         "PSRO_MIDRUN_RESUME", "0" if float(recipe["INIT_KL_COEF"] or "0.01") > 0 else "1"

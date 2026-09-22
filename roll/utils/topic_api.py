@@ -110,6 +110,47 @@ class TopicAPIConfig:
         return result
 
 
+def configure_local_topic_backend(environ: dict | None = None) -> None:
+    """Point TOPIC_API_* at the local judge, exactly as role_phase.sh does.
+
+    shared_game_reward_contract() resolves this configuration, and the local
+    backend only gets it from role_phase.sh -- which runs *after* the drivers
+    record their recipe. So `history_selfplay.py` died before training and
+    `cold_psro_local.py` died after a role had already finished, both with
+    "Set TOPIC_API_MODEL and TOPIC_API_KEY". Only the container survived,
+    because its entrypoint exports the same values first.
+
+    The base URL must match role_phase.sh's byte for byte: it goes into the
+    public contract, so a driver that recorded 127.0.0.1 while training used
+    the node address would make the run look like a contract change on resume.
+    """
+    import socket
+    import subprocess
+
+    environ = os.environ if environ is None else environ
+    if environ.get("GAME_REWARD_MODE", "legacy") != "shared_binary":
+        return
+    if environ.get("TOPIC_JUDGE_BACKEND", "local") != "local":
+        return
+    if environ.get("TOPIC_API_MODEL") and (
+        environ.get("TOPIC_API_KEY") or environ.get("TOPIC_API_KEY_FILE")
+    ):
+        return  # already configured, by the container or by the caller
+    judge_port = int(environ.get("JUDGE_PORT", "5100"))
+    port = int(environ.get("TOPIC_JUDGE_PORT", str(judge_port + 300)))
+    try:  # `hostname -I | awk '{print $1}'`, as role_phase.sh computes it
+        address = subprocess.run(["hostname", "-I"], capture_output=True, text=True,
+                                 timeout=10).stdout.split()[0]
+    except Exception:  # noqa: BLE001 - a usable fallback beats failing here
+        address = socket.gethostbyname(socket.gethostname())
+    environ.update(
+        TOPIC_API_PROVIDER="openai_compatible",
+        TOPIC_API_BASE_URL=f"http://{address}:{port}/v1",
+        TOPIC_API_MODEL="local-topic-judge",
+        TOPIC_API_KEY="local",
+    )
+
+
 def topic_api_contract():
     """Public experiment identity; no credentials or request timeout knobs."""
     return TopicAPIConfig.from_environment().public_contract()
