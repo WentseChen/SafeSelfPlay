@@ -306,6 +306,24 @@ def main() -> int:
         raise SystemExit(f"{args.tag} training failed rc={returncode}; "
                          f"see {training_log}")
 
+    # Same hook as the ladder trainer: a standalone oracle is a role training
+    # run too. Failures are reported and swallowed inside the publisher.
+    from roll.utils.checkpoint_publish import publish_role_checkpoint
+
+    final_checkpoint = max(
+        (d for d in (out_dir / "ckpt").glob("global_step*_hf") if d.is_dir()),
+        key=lambda d: int(d.name.removeprefix("global_step").removesuffix("_hf")),
+        default=None,
+    )
+    if final_checkpoint is not None:
+        publish_role_checkpoint(
+            final_checkpoint, run_suffix=args.tag, target=args.source_oracle,
+            role=role, log=log,
+            extra={"early_stop": stop_note, "steps_this_run": args.steps,
+                   "reward_mode": environment.get("GAME_REWARD_MODE", "legacy"),
+                   "topic_penalty": environment.get("TOPIC_PENALTY")},
+        )
+
     provenance = {
         "method": "standalone PSRO oracle follow-up run",
         "source_run": str(args.source_run),

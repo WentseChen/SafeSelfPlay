@@ -119,11 +119,9 @@ def test_zero_sum_reward_stays_antisymmetric_and_bounded_under_penalty():
         "is_parsing_error": False,
     }
     clean = compute_zero_sum_psro_reward(
-        prompt_type="generated_harmful", labels=labels
-    )
+        prompt_type="generated_harmful", labels=labels, attacker_cot_format_violation=False)
     drifted = compute_zero_sum_psro_reward(
-        prompt_type="generated_harmful", labels={**labels, "off_topic": True}
-    )
+        prompt_type="generated_harmful", labels={**labels, "off_topic": True}, attacker_cot_format_violation=False)
     # antisymmetry and bounds are the two invariants the matrix depends on
     for row in (clean, drifted):
         assert row["defender_zero_sum_reward"] == -row["attacker_zero_sum_reward"]
