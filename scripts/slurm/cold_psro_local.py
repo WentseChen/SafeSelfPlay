@@ -648,6 +648,18 @@ def make_local_oracle_trainer(psro: Any, cfg: Config):
             log(f"  stopped early; final checkpoint is {checkpoint.name}")
         if not psro._adapter_checkpoint(checkpoint):
             raise RuntimeError(f"{target} finished without {checkpoint}")
+        # Publishing is a side effect of a finished role, never a precondition:
+        # publish_role_checkpoint reports and swallows its own failures.
+        from roll.utils.checkpoint_publish import publish_role_checkpoint
+
+        publish_role_checkpoint(
+            checkpoint, run_suffix=cfg.suffix, target=target, role=role,
+            extra={"early_stop": stop_record.get("outcome"),
+                   "steps_per_role": environment.get("STEPS_PER_ROLE"),
+                   "reward_mode": environment.get("GAME_REWARD_MODE", "legacy"),
+                   "topic_penalty": environment.get("TOPIC_PENALTY")},
+            log=log,
+        )
 
         import hashlib
 
