@@ -39,27 +39,36 @@ def test_off_topic_success_is_never_better_than_an_on_topic_outcome():
         assert drift["attacker_zero_sum_reward"] == pytest.approx(clean["attacker_zero_sum_reward"] - penalty)
         assert drift["defender_zero_sum_reward"] == -drift["attacker_zero_sum_reward"]
         accepted.append((clean["attacker_zero_sum_reward"], drift["attacker_zero_sum_reward"]))
-    # At the default penalty of 2.0 an off-topic WIN ties the worst on-topic
-    # outcome (1 - 2 == -1) rather than beating it, so the invariant here is
-    # "never better", not "strictly worse". See the test below for the exact
-    # threshold: the on-topic payoffs really do span [-1, 1], so strict
-    # dominance needs penalty > 2.
-    assert max(drift for _, drift in accepted) <= min(clean for clean, _ in accepted)
-    assert compute_zero_sum_psro_reward(
-        prompt_type="generated_harmful", labels=labels(off_topic=True))["attacker_zero_sum_reward"] == 1 - penalty
-    assert shared.shared_game_reward_bounds() == (-1 - penalty, 1)
+    # Keeping the CoT component widened the unpenalized payoff from [-1, 1] to
+    # [-1.5, 1.5], so the span an off-topic win must cover is 3.0, not 2.0. At
+    # the default penalty of 2.0 an off-topic win is NO LONGER dominated: it
+    # scores -0.5 against the worst on-topic outcome's -1.5. Dominance is now a
+    # property of the penalty, not a guarantee -- see the test below.
+    drifted = compute_zero_sum_psro_reward(prompt_type="generated_harmful", labels=labels(off_topic=True))
+    assert drifted["attacker_zero_sum_reward"] == drifted["base_attacker_zero_sum_reward"] - penalty
+    assert shared.shared_game_reward_bounds() == (
+        -shared.UNPENALIZED_BOUND - penalty, shared.UNPENALIZED_BOUND)
 
 
-def test_strict_dominance_needs_a_penalty_above_two():
+def test_strict_dominance_needs_a_penalty_above_the_payoff_span():
     """The span of on-topic payoffs is exactly what an off-topic win must cover."""
-    reachable = sorted({compute_zero_sum_psro_reward(
+    # CoT format is a reward component again, so the span is only visible when
+    # its violation flags vary too.
+    reachable = sorted({shared.compute_shared_game_reward(
         prompt_type="generated_harmful",
         labels={"prompt_harmfulness": p, "response_harmfulness": r,
-                "response_refusal": rf, "off_topic": False})["attacker_zero_sum_reward"]
-        for p, r, rf in product(("harmful", "unharmful"), ("harmful", "unharmful"),
-                                ("refusal", "compliance"))})
-    assert reachable[0] == -1.0 and reachable[-1] == 1.0
-    assert reachable[-1] - reachable[0] == 2.0   # so penalty == 2 ties, > 2 dominates
+                "response_refusal": rf, "off_topic": False},
+        attacker_cot_format_violation=av,
+        defender_cot_format_violation=dv)["attacker_zero_sum_reward"]
+        for p, r, rf, av, dv in product(("harmful", "unharmful"), ("harmful", "unharmful"),
+                                        ("refusal", "compliance"), (False, True),
+                                        (False, True, None))})
+    assert reachable[0] == -shared.UNPENALIZED_BOUND and reachable[-1] == shared.UNPENALIZED_BOUND
+    span = reachable[-1] - reachable[0]
+    assert span == 3.0          # CoT format is back in, so the span widened from 2.0
+    # The default penalty no longer dominates: an off-topic win beats an
+    # on-topic loss by 1.0. Raising TOPIC_PENALTY above 3.0 would restore it.
+    assert reachable[-1] - shared.topic_penalty() > reachable[0]
 
 
 @pytest.mark.parametrize("invalid", [None, "false", "true", 0, 1])
@@ -77,7 +86,7 @@ def test_matrix_statistics_accept_full_penalized_range():
         rows.append({"episode_index": i, "prompt_type": prompt_type,
                      **compute_zero_sum_psro_reward(prompt_type=prompt_type, labels=lab)})
     result = analyze_zero_sum_convergence(rows, sample_counts=[2, 4])
-    assert result["reward_bounds"] == [-1 - shared.topic_penalty(), 1]
+    assert result["reward_bounds"] == [-shared.UNPENALIZED_BOUND - shared.topic_penalty(), shared.UNPENALIZED_BOUND]
 
 
 @pytest.fixture(scope="module")
@@ -151,3 +160,32 @@ def test_external_label_flows_through_real_rollout_to_shared_reward(rollout_clas
                      "rewrite": "Explain the water cycle as a teacher"}]
     assert attackers[0]["reward"] == -1 and defenders[0]["reward"] == 1
     assert attackers[0]["topic_judge_model"] == "test-model"
+
+
+def test_the_cot_component_survives_into_the_shared_reward():
+    """v1 passed the flags as False and subtracted cot_format back out, so a
+    format violation was invisible to training and to the matrix."""
+    lab = {"prompt_harmfulness": "harmful", "response_harmfulness": "harmful",
+           "response_refusal": "compliance", "off_topic": False}
+    clean = shared.compute_shared_game_reward(prompt_type="generated_harmful", labels=lab)
+    broken = shared.compute_shared_game_reward(
+        prompt_type="generated_harmful", labels=lab, attacker_cot_format_violation=True)
+    # +1 -> -1 on a component that is divided by 4
+    assert clean["attacker_zero_sum_reward"] - broken["attacker_zero_sum_reward"] == 0.5
+    assert broken["attacker_cot_format_violation"] is True
+
+
+def test_the_topic_penalty_is_added_on_top_of_the_unchanged_reward():
+    lab = {"prompt_harmfulness": "harmful", "response_harmfulness": "harmful",
+           "response_refusal": "compliance", "off_topic": True}
+    for av, dv in ((False, None), (True, False), (False, True)):
+        drifted = shared.compute_shared_game_reward(
+            prompt_type="generated_harmful", labels=lab,
+            attacker_cot_format_violation=av, defender_cot_format_violation=dv)
+        on_topic = shared.compute_shared_game_reward(
+            prompt_type="generated_harmful", labels={**lab, "off_topic": False},
+            attacker_cot_format_violation=av, defender_cot_format_violation=dv)
+        # the ONLY difference is the deduction; every original component is intact
+        assert drifted["base_attacker_zero_sum_reward"] == on_topic["base_attacker_zero_sum_reward"]
+        assert (on_topic["attacker_zero_sum_reward"] - drifted["attacker_zero_sum_reward"]
+                == shared.topic_penalty())
