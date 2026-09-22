@@ -2,7 +2,7 @@
 # Build/run the 4xH200 Llama-3.1-8B abliterated role-LoRA container.
 set -euo pipefail
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-IMAGE=${SSP_IMAGE:-safeselfplay:llama8b-h200-labels-20260920}
+IMAGE=${SSP_IMAGE:-safeselfplay:llama8b-h200-labels-20260923}
 ACTION=${1:---help}
 if [ "$#" -gt 0 ]; then shift; fi
 case "$ACTION" in

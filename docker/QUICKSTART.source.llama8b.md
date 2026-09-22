@@ -4,6 +4,9 @@
 包含源码、Dockerfile、运行脚本和少量项目数据。镜像构建排除 API key，凭据通过运行时环境变量传入。
 运行依赖、其余上游训练数据和模型权重由老师的服务器下载。
 
+2026-09-23 版同步最新主分支，包含运行全程的本地 judge 服务、矩阵评估分卡、旧奖励补丁检测及 Hugging Face checkpoint 上传修复。
+更新后需重新执行 `build`，才能让容器使用新版代码。
+
 训练模型：`mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated`。按顺序执行：**联网构建 → 选择 label → 下载模型 → 三组训练**。
 下列命令用于 Linux x86_64 / 4×H200 服务器的 Bash；Mac 用于下载和转交这个压缩包。
 
@@ -122,7 +125,7 @@ cd SafeSelfPlay-llama8b-h200
 进入代码目录后构建镜像：
 
 ```bash
-export SSP_IMAGE=safeselfplay:llama8b-h200-labels-20260920
+export SSP_IMAGE=safeselfplay:llama8b-h200-labels-20260923
 export SSP_DOCKER_WORKSPACE="$HOME/safeselfplay-data"
 export GPU_DEVICES=0,1,2,3
 
