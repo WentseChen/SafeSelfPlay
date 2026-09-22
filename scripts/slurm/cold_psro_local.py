@@ -652,8 +652,14 @@ def make_local_oracle_trainer(psro: Any, cfg: Config):
         # publish_role_checkpoint reports and swallows its own failures.
         from roll.utils.checkpoint_publish import publish_role_checkpoint
 
+        # history_selfplay builds its own config without `suffix` or
+        # `run_root`; run_dir is <root>/<suffix>/training/<target> in every
+        # caller, so its grandparent name is the suffix.
+        run_suffix = (getattr(cfg, "suffix", None)
+                      or getattr(getattr(cfg, "run_root", None), "name", None)
+                      or run_dir.parent.parent.name)
         publish_role_checkpoint(
-            checkpoint, run_suffix=cfg.suffix, target=target, role=role,
+            checkpoint, run_suffix=run_suffix, target=target, role=role,
             extra={"early_stop": stop_record.get("outcome"),
                    "steps_per_role": environment.get("STEPS_PER_ROLE"),
                    "reward_mode": environment.get("GAME_REWARD_MODE", "legacy"),
