@@ -2,7 +2,7 @@
 # Build/run the 4xH200 Llama-3.1-8B abliterated role-LoRA container.
 set -euo pipefail
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-IMAGE=${SSP_IMAGE:-safeselfplay:llama8b-h200-labels-20260919}
+IMAGE=${SSP_IMAGE:-safeselfplay:llama8b-h200-labels-20260920}
 ACTION=${1:---help}
 if [ "$#" -gt 0 ]; then shift; fi
 case "$ACTION" in
@@ -11,6 +11,9 @@ case "$ACTION" in
     echo "Defaults: GPU_DEVICES=0,1,2,3; SSP_DOCKER_WORKSPACE=$REPO/output/docker-llama8b"
     exit 0 ;;
   build)
+    # Stamp the commit being baked in. Without it a rebuilt image and a stale
+    # one look identical, and the stale one reintroduces the bugs it was built
+    # before -- the code is COPYed into the image, never mounted.
     REVISION=$(git -C "$REPO" rev-parse HEAD 2>/dev/null || echo unknown)
     if [ "$REVISION" = unknown ] && [ -f "$REPO/BUILD_BUNDLE.json" ]; then
       BUNDLE_REVISION=$(sed -n 's/.*"base_git_commit": "\([0-9a-f]*\)".*/\1/p' "$REPO/BUILD_BUNDLE.json")

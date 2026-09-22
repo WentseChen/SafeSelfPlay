@@ -149,6 +149,35 @@ def check_gpus() -> None:
         print(f"GPU {index}: {gpu.name}, {gpu.total_memory / 2**30:.1f} GiB", flush=True)
 
 
+def report_build_provenance(env: dict[str, str]) -> None:
+    """Say which commit is baked into this image, and refuse a stale one.
+
+    The repo is COPYed into the image, so a container's code is frozen at build
+    time while /workspace persists across images. An image built before the
+    judges were placed on separate cards puts both on GPU 0 and dies at step 0
+    with "No available memory for the cache blocks" -- an expensive way to find
+    out you forgot to rebuild.
+
+    The test is on the baked source, not on a version string: a stale image is
+    stale whatever it claims.
+    """
+    info = REPO / "BUILD_INFO"
+    stamp = info.read_text().strip().replace("\n", " ") if info.is_file() else ""
+    print(f"image build: {stamp or 'unstamped (built before provenance was added)'}", flush=True)
+    phase = (REPO / "scripts/slurm/role_phase.sh").read_text()
+    missing = [knob for knob in ("TOPIC_JUDGE_GPU", "TOPIC_JUDGE_MAX_LEN")
+               if knob not in phase]
+    if missing:
+        raise RuntimeError(
+            f"This image predates the judge-placement fix ({', '.join(missing)} absent from "
+            f"role_phase.sh), so both judges would land on one card and training would die "
+            f"with 'No available memory for the cache blocks'. Rebuild it: "
+            f"bash docker/run_llama8b.sh build"
+        )
+    print(f"judge placement: WildGuard on GPU {env.get('JUDGE_GPU', '0')}, "
+          f"topic judge on GPU {env.get('TOPIC_JUDGE_GPU', '(resolved at launch)')}", flush=True)
+
+
 def training_command(args, env: dict[str, str]) -> list[str]:
     workspace = Path(env.get("SSP_ROOT", "/workspace"))
     if args.command == "role":
@@ -283,6 +312,7 @@ def main(argv=None) -> int:
     if env.get("DRY_RUN") != "1" or args.command == "check":
         check_gpus()
     if args.command == "check":
+        report_build_provenance(env)
         print("Four GPUs and cached model paths found; no training started.")
         return 0
     command = training_command(args, env)

@@ -122,7 +122,7 @@ cd SafeSelfPlay-llama8b-h200
 进入代码目录后构建镜像：
 
 ```bash
-export SSP_IMAGE=safeselfplay:llama8b-h200-labels-20260919
+export SSP_IMAGE=safeselfplay:llama8b-h200-labels-20260920
 export SSP_DOCKER_WORKSPACE="$HOME/safeselfplay-data"
 export GPU_DEVICES=0,1,2,3
 
