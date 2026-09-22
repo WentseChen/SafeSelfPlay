@@ -1136,6 +1136,15 @@ def main() -> int:
         service_env.setdefault("TOPIC_JUDGE_PORT",
                                str(int(os.environ.get("JUDGE_PORT", cfg.train_judge_port)) + 300))
         service_env.setdefault("TOPIC_JUDGE_MODEL", os.environ.get("BASE_MODEL_PATH", ""))
+        # serve_topic_judge.py defaults to 0.60 of the card when run standalone,
+        # which is right for a dedicated engine and catastrophic here: it starves
+        # the trainable engine, the opponent and the ZeRO-3 shard sharing that
+        # card, and the failure surfaces as an opaque NCCL "unhandled cuda
+        # error" at init. Mirror role_phase.sh's measured budget instead.
+        service_env.setdefault("TOPIC_JUDGE_UTIL", "0.13")
+        service_env.setdefault("TOPIC_JUDGE_MAX_LEN", "4096")
+        judge_gpu = int(os.environ.get("JUDGE_GPU", "0"))
+        service_env.setdefault("TOPIC_JUDGE_GPU", str((judge_gpu + 1) % max(cfg.gpus, 1)))
         judge_context = local_topic_service(service_env, SLURM_DIR.parent.parent)
         log(f"run-scoped topic judge on :{service_env['TOPIC_JUDGE_PORT']} "
             f"(GPU {service_env.get('TOPIC_JUDGE_GPU', '3')})")

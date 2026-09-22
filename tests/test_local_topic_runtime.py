@@ -163,3 +163,17 @@ def test_the_hosted_backend_is_not_touched(monkeypatch):
     monkeypatch.delenv("TOPIC_API_PROVIDER", raising=False)
     configure_local_topic_backend()
     assert "TOPIC_API_PROVIDER" not in os.environ
+
+
+def test_the_run_scoped_judge_uses_the_colocated_budget():
+    """serve_topic_judge.py defaults to 0.60 of the card, which is right for a
+    dedicated engine and catastrophic for one sharing a card with the trainable
+    engine, the opponent and a ZeRO-3 shard -- it surfaces as an opaque NCCL
+    'unhandled cuda error' at init, not as an OOM."""
+    driver = Path("scripts/slurm/cold_psro_local.py").read_text()
+    block = driver[driver.index("local_topic_service"):]
+    block = block[:block.index("actions = 0")]
+    assert 'setdefault("TOPIC_JUDGE_UTIL", "0.13")' in block
+    assert 'setdefault("TOPIC_JUDGE_MAX_LEN", "4096")' in block
+    # and it must not land on WildGuard's card
+    assert 'TOPIC_JUDGE_GPU' in block and '(judge_gpu + 1)' in block
