@@ -157,6 +157,7 @@ def test_wrapper_gpu_selection_and_credentials(tmp_path, method, dry_run, gpus):
     mock.chmod(0o755)
     env = dict(os.environ, PATH=f"{binary}:{os.environ['PATH']}",
                HF_TOKEN="test-secret", SSP_DOCKER_WORKSPACE=str(tmp_path / "workspace"),
+               HF_CHECKPOINT_REPO="test-org/checkpoints", HF_CHECKPOINT_PRIVATE="1",
                GPU_DEVICES="4,5,6,7", DRY_RUN=str(int(dry_run)),
                TOPIC_JUDGE_BACKEND="anthropic", TOPIC_API_MODEL="claude-opus-5",
                TOPIC_API_KEY="private-topic-test-key")
@@ -169,6 +170,7 @@ def test_wrapper_gpu_selection_and_credentials(tmp_path, method, dry_run, gpus):
         assert args[args.index("--gpus") + 1] == '"device=4,5,6,7"'
     assert "test-secret" not in result.stdout
     assert "HF_TOKEN" in args
+    assert "HF_CHECKPOINT_REPO" in args and "HF_CHECKPOINT_PRIVATE" in args
     assert "TOPIC_JUDGE_BACKEND" in args and "TOPIC_API_MODEL" in args
     assert "TOPIC_API_KEY" in args and "private-topic-test-key" not in result.stdout
     assert args[-1] == method
@@ -184,7 +186,7 @@ def test_handoff_packaging_omits_untracked_caches_and_credentials(tmp_path):
     with tarfile.open(archive) as bundle:
         names = {member.name.split("/", 1)[1] for member in bundle.getmembers()}
         assert {"docker/Dockerfile.llama8b", "docker/README.llama8b.md", "scripts/slurm/history_selfplay.py",
-                "roll/utils/history_selfplay.py", "START_HERE.md"} <= names
+                "roll/utils/history_selfplay.py", "TOPIC_JUDGE_AND_SHARED_REWARD.md", "START_HERE.md"} <= names
         assert "uv.lock" not in names
         assert "docker/wandb.fixed.json" not in names
         assert not any(name.startswith(("output/", ".git/", ".env", "hf/")) for name in names)

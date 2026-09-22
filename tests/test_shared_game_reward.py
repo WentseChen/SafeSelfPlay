@@ -107,7 +107,9 @@ def rollout_class(tmp_path_factory):
     return namespace["DialogueGameManager"], namespace
 
 
-def make_manager(cls, *, prompt_type="generated_harmful", bad_format=False):
+def make_manager(cls, *, prompt_type="generated_harmful", bad_format=False, defender_bad_format=None):
+    if defender_bad_format is None:
+        defender_bad_format = bad_format
     manager = object.__new__(cls)
     manager.custom_configs = {"optimizer_train_role": "attacker", "label_drift_training_policy": training.TRAINING_LABEL_DRIFT_POLICY}
     manager.disable_hidden_cot = False
@@ -116,18 +118,26 @@ def make_manager(cls, *, prompt_type="generated_harmful", bad_format=False):
         "history": [{"content": "Explain the water cycle as a teacher"}, {"content": "A reply"}],
         "is_generated_attack": True,
         "processed_output_history": [{"output": role, "game_states": {
-            "game_role": role, "prompt_type": prompt_type, "cot_format_violation": bad_format}}
+            "game_role": role, "prompt_type": prompt_type,
+            "cot_format_violation": bad_format if role == "attacker" else defender_bad_format}}
             for role in ("attacker", "defender")]}}
     return manager
 
 
-@pytest.mark.parametrize("off_topic,bad_format", list(product((False, True), repeat=2)))
-def test_production_rollout_and_matrix_rewards_match_even_with_format_shaping(rollout_class, off_topic, bad_format):
+@pytest.mark.parametrize("off_topic,attacker_bad,defender_bad", list(product((False, True), repeat=3)))
+def test_production_rollout_and_matrix_rewards_match_even_with_format_shaping(
+    rollout_class, off_topic, attacker_bad, defender_bad,
+):
     cls, _ = rollout_class
-    manager = make_manager(cls, bad_format=bad_format)
+    manager = make_manager(cls, bad_format=attacker_bad, defender_bad_format=defender_bad)
     lab = labels(off_topic=off_topic)
     _, attackers, _, defenders, _ = manager.filter_and_compute_rewards({0: lab})
-    matrix = compute_zero_sum_psro_reward(prompt_type="generated_harmful", labels=lab, attacker_cot_format_violation=False)
+    matrix = compute_zero_sum_psro_reward(
+        prompt_type="generated_harmful", labels=lab,
+        attacker_cot_format_violation=attacker_bad, defender_cot_format_violation=defender_bad,
+    )
+    expected = 1.0 - 0.5 * attacker_bad + 0.5 * defender_bad - 2 * off_topic
+    assert attackers[0]["reward"] == expected
     assert attackers[0]["reward"] == matrix["attacker_zero_sum_reward"]
     assert defenders[0]["reward"] == matrix["defender_zero_sum_reward"]
     assert attackers[0]["topic_reward_component"] == (-2 if off_topic else 0)

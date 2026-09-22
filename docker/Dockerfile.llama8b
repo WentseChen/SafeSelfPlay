@@ -30,7 +30,7 @@ COPY _modal_patches/ ./_modal_patches/
 COPY scripts/slurm/ ./scripts/slurm/
 COPY data/safety_selfplay/ ./data/safety_selfplay/
 COPY docker/ ./docker/
-COPY README.md EXPERIMENTS.md ./
+COPY README.md EXPERIMENTS.md TOPIC_JUDGE_AND_SHARED_REWARD.md ./
 
 # Build provenance. The repo is COPYed in, not mounted, so a container's code is
 # frozen at build time and a stale image is otherwise indistinguishable from a

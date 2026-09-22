@@ -15,7 +15,7 @@ import tarfile
 ROOT = Path(__file__).resolve().parents[1]
 TOP = "SafeSelfPlay-llama8b-h200"
 ADDED = {
-    "EXPERIMENTS.md", "roll/utils/history_selfplay.py",
+    "EXPERIMENTS.md", "TOPIC_JUDGE_AND_SHARED_REWARD.md", "roll/utils/history_selfplay.py",
     "roll/utils/shared_game_reward.py", "roll/utils/topic_api.py",
     "roll/utils/local_topic_runtime.py", "tests/test_local_topic_runtime.py",
     "tests/test_shared_game_reward.py", "tests/test_topic_api.py",

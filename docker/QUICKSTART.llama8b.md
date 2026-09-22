@@ -120,11 +120,11 @@ export GAME_REWARD_MODE=shared_binary
 export TOPIC_PENALTY=2
 ```
 
-`TOPIC_PENALTY=2` 是当前默认值，也是下文所有示例使用的设置。取 2 的原因：
-未罚分的对局收益落在 `[-1, 1]`，罚 2 之后“偏题且赢”的收益 `1-2=-1` 与
-“不偏题且输”的 `-1` 相等，偏题不再占优；同时罚分项对 reward 方差的贡献与对局
-本身持平，而不是数倍于它。实测 100 步 A3：相对同步数无罚分对照，on-topic 由
-43% 升到 87%，攻击 reward 仍在上升。严格占优需要 `TOPIC_PENALTY > 2`。
+`TOPIC_PENALTY=2` 保持为默认值。当前 reward 版本为 `shared-terminal-binary-topic-v2`：
+`r_A,r_D` 保留各自的 CoT 格式奖励，再叠加偏题惩罚；未罚分的投影使用
+`[-1.5, 1.5]` 界，默认 attacker 总收益界为 `[-3.5, 1.5]`。
+恢复格式项后，不能沿用旧版“罚 2 即保证所有偏题对局都不占优”的解释。
+更新前的 v1 运行与新版奖励不同，请使用新的 `--run-suffix`，不要混用两版结果。
 
 判定模型默认是 **方式 A（本地 Llama 8B abliterated）**，不需要任何 API key。
 

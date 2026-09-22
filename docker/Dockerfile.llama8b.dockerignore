@@ -4,6 +4,7 @@
 !/*.py
 !/README.md
 !/EXPERIMENTS.md
+!/TOPIC_JUDGE_AND_SHARED_REWARD.md
 !/roll/
 !/roll/**
 !/_modal_patches/
