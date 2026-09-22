@@ -46,7 +46,7 @@ def compute_zero_sum_psro_reward(
     *,
     prompt_type: str,
     labels: Mapping[str, Any],
-    attacker_cot_format_violation: bool = False,
+    attacker_cot_format_violation: bool,
     defender_cot_format_violation: bool | None = None,
 ) -> dict[str, Any]:
     """Project one terminal general-sum outcome to an exact zero-sum payoff.

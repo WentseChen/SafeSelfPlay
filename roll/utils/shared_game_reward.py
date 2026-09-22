@@ -69,10 +69,18 @@ def shared_game_reward_contract() -> dict[str, Any]:
 
 
 def compute_shared_game_reward(
-    *, prompt_type: str, labels: Mapping[str, Any], penalty: float | None = None,
-    attacker_cot_format_violation: bool = False,
+    *, prompt_type: str, labels: Mapping[str, Any],
+    attacker_cot_format_violation: bool,
     defender_cot_format_violation: bool | None = None,
+    penalty: float | None = None,
 ) -> dict[str, Any]:
+    # attacker_cot_format_violation has NO default, deliberately, exactly as
+    # compute_upstream_v2_raw_rewards declares it. A default here is not a
+    # convenience: it silently turns the attacker's format component into a
+    # constant +1 at any call site that forgets to pass it, which is an
+    # unconditional reward rather than a missing one, and the gradient stops
+    # constraining format at all. That is precisely how the training call site
+    # was missed while the contract still advertised format_reward: true.
     if prompt_type not in {"generated_harmful", "generated_benign"}:
         raise ValueError("Shared game reward requires a generated request")
     if bool(labels.get("is_parsing_error", False)):

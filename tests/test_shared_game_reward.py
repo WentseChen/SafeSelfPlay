@@ -34,8 +34,8 @@ def test_off_topic_success_is_never_better_than_an_on_topic_outcome():
     for prompt, response, refusal in product(("harmful", "unharmful"), ("harmful", "unharmful"), ("refusal", "compliance")):
         lab = {"prompt_harmfulness": prompt, "response_harmfulness": response,
                "response_refusal": refusal, "off_topic": False}
-        clean = compute_zero_sum_psro_reward(prompt_type="generated_harmful", labels=lab)
-        drift = compute_zero_sum_psro_reward(prompt_type="generated_harmful", labels={**lab, "off_topic": True})
+        clean = compute_zero_sum_psro_reward(prompt_type="generated_harmful", labels=lab, attacker_cot_format_violation=False)
+        drift = compute_zero_sum_psro_reward(prompt_type="generated_harmful", labels={**lab, "off_topic": True}, attacker_cot_format_violation=False)
         assert drift["attacker_zero_sum_reward"] == pytest.approx(clean["attacker_zero_sum_reward"] - penalty)
         assert drift["defender_zero_sum_reward"] == -drift["attacker_zero_sum_reward"]
         accepted.append((clean["attacker_zero_sum_reward"], drift["attacker_zero_sum_reward"]))
@@ -44,7 +44,7 @@ def test_off_topic_success_is_never_better_than_an_on_topic_outcome():
     # the default penalty of 2.0 an off-topic win is NO LONGER dominated: it
     # scores -0.5 against the worst on-topic outcome's -1.5. Dominance is now a
     # property of the penalty, not a guarantee -- see the test below.
-    drifted = compute_zero_sum_psro_reward(prompt_type="generated_harmful", labels=labels(off_topic=True))
+    drifted = compute_zero_sum_psro_reward(prompt_type="generated_harmful", labels=labels(off_topic=True), attacker_cot_format_violation=False)
     assert drifted["attacker_zero_sum_reward"] == drifted["base_attacker_zero_sum_reward"] - penalty
     assert shared.shared_game_reward_bounds() == (
         -shared.UNPENALIZED_BOUND - penalty, shared.UNPENALIZED_BOUND)
@@ -74,7 +74,7 @@ def test_strict_dominance_needs_a_penalty_above_the_payoff_span():
 @pytest.mark.parametrize("invalid", [None, "false", "true", 0, 1])
 def test_missing_or_non_boolean_topic_label_fails(invalid):
     with pytest.raises(ValueError, match="boolean"):
-        shared.compute_shared_game_reward(prompt_type="generated_harmful", labels=labels(off_topic=invalid))
+        shared.compute_shared_game_reward(prompt_type="generated_harmful", labels=labels(off_topic=invalid), attacker_cot_format_violation=False)
 
 
 def test_matrix_statistics_accept_full_penalized_range():
@@ -84,7 +84,7 @@ def test_matrix_statistics_accept_full_penalized_range():
         if prompt_type == "generated_benign":
             lab["prompt_harmfulness"] = "unharmful"
         rows.append({"episode_index": i, "prompt_type": prompt_type,
-                     **compute_zero_sum_psro_reward(prompt_type=prompt_type, labels=lab)})
+                     **compute_zero_sum_psro_reward(prompt_type=prompt_type, labels=lab, attacker_cot_format_violation=False)})
     result = analyze_zero_sum_convergence(rows, sample_counts=[2, 4])
     assert result["reward_bounds"] == [-shared.UNPENALIZED_BOUND - shared.topic_penalty(), shared.UNPENALIZED_BOUND]
 
@@ -127,7 +127,7 @@ def test_production_rollout_and_matrix_rewards_match_even_with_format_shaping(ro
     manager = make_manager(cls, bad_format=bad_format)
     lab = labels(off_topic=off_topic)
     _, attackers, _, defenders, _ = manager.filter_and_compute_rewards({0: lab})
-    matrix = compute_zero_sum_psro_reward(prompt_type="generated_harmful", labels=lab)
+    matrix = compute_zero_sum_psro_reward(prompt_type="generated_harmful", labels=lab, attacker_cot_format_violation=False)
     assert attackers[0]["reward"] == matrix["attacker_zero_sum_reward"]
     assert defenders[0]["reward"] == matrix["defender_zero_sum_reward"]
     assert attackers[0]["topic_reward_component"] == (-2 if off_topic else 0)
@@ -140,7 +140,7 @@ def test_both_training_roles_drop_same_invalid_games_as_matrix(rollout_class):
     result = manager.filter_and_compute_rewards({0: labels()})
     assert result[:4] == ([], [], [], [])
     with pytest.raises(ZeroSumEpisodeDrop):
-        compute_zero_sum_psro_reward(prompt_type="generated_benign", labels=labels())
+        compute_zero_sum_psro_reward(prompt_type="generated_benign", labels=labels(), attacker_cot_format_violation=False)
 
 
 def test_external_label_flows_through_real_rollout_to_shared_reward(rollout_class, monkeypatch):
@@ -167,7 +167,7 @@ def test_the_cot_component_survives_into_the_shared_reward():
     format violation was invisible to training and to the matrix."""
     lab = {"prompt_harmfulness": "harmful", "response_harmfulness": "harmful",
            "response_refusal": "compliance", "off_topic": False}
-    clean = shared.compute_shared_game_reward(prompt_type="generated_harmful", labels=lab)
+    clean = shared.compute_shared_game_reward(prompt_type="generated_harmful", labels=lab, attacker_cot_format_violation=False)
     broken = shared.compute_shared_game_reward(
         prompt_type="generated_harmful", labels=lab, attacker_cot_format_violation=True)
     # +1 -> -1 on a component that is divided by 4
@@ -189,3 +189,31 @@ def test_the_topic_penalty_is_added_on_top_of_the_unchanged_reward():
         assert drifted["base_attacker_zero_sum_reward"] == on_topic["base_attacker_zero_sum_reward"]
         assert (on_topic["attacker_zero_sum_reward"] - drifted["attacker_zero_sum_reward"]
                 == shared.topic_penalty())
+
+
+def test_the_attacker_flag_has_no_default():
+    """A default turns the attacker's format component into a constant +1 at
+    any call site that forgets it -- an unconditional reward, not a missing
+    one -- which is how the training call site stayed broken while the
+    contract still advertised format_reward: true."""
+    import inspect
+
+    for func in (shared.compute_shared_game_reward, compute_zero_sum_psro_reward):
+        parameter = inspect.signature(func).parameters["attacker_cot_format_violation"]
+        assert parameter.default is inspect.Parameter.empty, func.__name__
+    with pytest.raises(TypeError):
+        shared.compute_shared_game_reward(
+            prompt_type="generated_harmful", labels=labels(off_topic=False))
+
+
+def test_the_training_call_site_passes_the_real_violations():
+    """The matrix path being fixed is not enough: format collapse is a
+    training-time phenomenon, so the injected game-loop patch must forward the
+    per-role flags it reads from processed_output_history."""
+    patch = Path("modal_upstream_selfredteam_role_lora_v2.py").read_text()
+    start = patch.index("shared_score = compute_shared_game_reward(")
+    call = patch[start:start + 400]
+    assert "attacker_cot_format_violation=" in call
+    assert "defender_cot_format_violation=" in call
+    # and the flags must come from the turn states, not be hard-coded
+    assert "cot_format_violation" in patch[:patch.index("shared_score = compute_shared_game_reward(")][-900:]
