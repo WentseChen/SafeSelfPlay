@@ -46,11 +46,7 @@ from roll.utils.shared_game_reward import shared_game_reward_enabled, shared_gam
 from roll.utils.topic_api import configure_local_topic_backend
 
 
-def _shared_reward_contract():
-    """Resolve the local judge first: this call happens AFTER a role has
-    finished training, so failing here would discard a completed oracle."""
-    configure_local_topic_backend()
-    return shared_game_reward_contract()
+
 
 SLURM_DIR = Path(__file__).resolve().parent
 ROLE_PHASE = SLURM_DIR / "role_phase.sh"
@@ -685,8 +681,7 @@ def make_local_oracle_trainer(psro: Any, cfg: Config):
                 "role": role,
                 "ppo_reward_type": SHARED_GAME_REWARD_VERSION if shared_game_reward_enabled() else "general_sum",
                 "strict_zero_sum_ppo_reward": shared_game_reward_enabled(),
-                "shared_game_reward": (_shared_reward_contract()
-                                       if shared_game_reward_enabled() else None),
+                "shared_game_reward": shared_game_reward_contract() if shared_game_reward_enabled() else None,
                 "label_drift_training_policy": "drop benign-to-harmful as in matrix" if shared_game_reward_enabled() else psro.TRAINING_LABEL_DRIFT_POLICY,
                 "prompt_label_balance": (
                     "deterministic exact 50/50 harmful/benign finite prefix"
@@ -1016,6 +1011,10 @@ def prefetch_cells(psro: Any, cfg: Config, state: dict[str, Any], judge: Judge) 
 
 
 def main() -> int:
+    # Before anything reads the reward contract. advance_cold_psro writes it
+    # during initialize_state, and that call lives in a contract-hashed source
+    # we must not edit, so the configuration has to be in place beforehand.
+    configure_local_topic_backend()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", required=True, type=Path)
     parser.add_argument("--work", required=True, type=Path)

@@ -55,9 +55,6 @@ def run_baseline(psro: Any, cfg: Any, train: Any, *, method: str, rounds: int, s
     }
     recipe = {key: os.environ.get(key, default) for key, default in recipe_defaults.items()}
     if shared_game_reward_enabled():
-        # role_phase.sh configures the local judge, but it runs after this
-        # recipe is recorded; without this the baseline dies before training.
-        configure_local_topic_backend()
         recipe["shared_game_reward"] = shared_game_reward_contract()
     recipe["PSRO_MIDRUN_RESUME"] = os.environ.get(
         "PSRO_MIDRUN_RESUME", "0" if float(recipe["INIT_KL_COEF"] or "0.01") > 0 else "1"
@@ -120,6 +117,9 @@ def run_baseline(psro: Any, cfg: Any, train: Any, *, method: str, rounds: int, s
 
 
 def main(argv=None) -> int:
+    # Before anything reads the reward contract; role_phase.sh only configures
+    # the local judge later, inside the training phase.
+    configure_local_topic_backend()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--method", choices=("uniform", "naive"), required=True)
     parser.add_argument("--run-suffix", required=True)
