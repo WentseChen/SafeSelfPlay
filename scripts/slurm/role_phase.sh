@@ -415,6 +415,21 @@ fi
 
 if [ "${GAME_REWARD_MODE:-legacy}" = shared_binary ]; then
   "$PY" -c 'from roll.utils.shared_game_reward import shared_game_reward_contract; shared_game_reward_contract()'
+  # The shared reward reaches training only through a patch that
+  # prepare_sources.py injects into the working copy of language_game.py. A
+  # work tree prepared before that patch existed trains on the LEGACY reward
+  # while every banner and contract still says shared_binary -- silently wrong
+  # results, which is far worse than a failed run. Verify the live file.
+  GAME_LOOP=$WORK/openrlhf/trainer/ppo_utils/language_game.py
+  for marker in compute_shared_game_reward attacker_cot_format_violation; do
+    if ! grep -q "$marker" "$GAME_LOOP" 2>/dev/null; then
+      echo "$TAG GAME_REWARD_MODE=shared_binary but $GAME_LOOP has no '$marker'." >&2
+      echo "$TAG The working copy predates the reward patch and would train on the" >&2
+      echo "$TAG LEGACY reward. Re-run: SSP_ROOT=\$SSP_ROOT SSP_WORK=\$WORK \\" >&2
+      echo "$TAG   \"\$PY\" scripts/slurm/prepare_sources.py" >&2
+      exit 1
+    fi
+  done
 fi
 
 # --- judge --------------------------------------------------------------------

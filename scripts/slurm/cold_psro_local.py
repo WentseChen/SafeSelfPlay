@@ -25,6 +25,7 @@ contract pins save_steps to the final step, so there is no mid-role checkpoint).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -1119,8 +1120,29 @@ def main() -> int:
             f"steps_per_role={contract['steps_per_role']} "
             f"episodes/cell={contract['matrix_episodes_per_cell']}")
 
+    # PSRO cells call the topic API directly and nothing else keeps a judge
+    # alive between phases, so with the local backend the matrix stage died
+    # with "Topic API request failed or timed out". Own one judge for the whole
+    # run, as the container's entrypoint already does.
+    judge_context = contextlib.nullcontext()
+    if (shared_game_reward_enabled()
+            and os.environ.get("TOPIC_JUDGE_BACKEND", "local") == "local"
+            and os.environ.get("TOPIC_JUDGE_MANAGED") != "1"):
+        from roll.utils.local_topic_runtime import local_topic_service
+
+        service_env = dict(os.environ)
+        service_env.setdefault("SSP_PYTHON", cfg.python)
+        service_env.setdefault("SSP_ROOT", str(cfg.workspace))
+        service_env.setdefault("TOPIC_JUDGE_PORT",
+                               str(int(os.environ.get("JUDGE_PORT", cfg.train_judge_port)) + 300))
+        service_env.setdefault("TOPIC_JUDGE_MODEL", os.environ.get("BASE_MODEL_PATH", ""))
+        judge_context = local_topic_service(service_env, SLURM_DIR.parent.parent)
+        log(f"run-scoped topic judge on :{service_env['TOPIC_JUDGE_PORT']} "
+            f"(GPU {service_env.get('TOPIC_JUDGE_GPU', '3')})")
+
     actions = 0
     try:
+      with judge_context:
         while True:
             if not state_path.is_file():
                 initialize_state(psro, cfg, advance_kwargs)

@@ -123,6 +123,17 @@ class Game:
     assert ("off_topic" in labels[0]) is not fails
 
 
+def patched_work_tree(work):
+    """role_phase.sh refuses shared_binary on a work tree that predates the
+    reward patch, because it would silently train on the LEGACY reward. Model
+    a correctly prepared tree."""
+    loop = work / "openrlhf/trainer/ppo_utils"
+    loop.mkdir(parents=True, exist_ok=True)
+    (loop / "language_game.py").write_text(
+        "compute_shared_game_reward(\n"
+        "    attacker_cot_format_violation=..., defender_cot_format_violation=...)\n")
+
+
 def executable(path, content):
     path.write_text("#!/usr/bin/env bash\n" + content)
     path.chmod(0o755)
@@ -133,6 +144,7 @@ def test_role_phase_health_failure_and_service_cleanup(tmp_path, judge_ready, ve
     work, sft, commands = (tmp_path / name for name in ("work", "sft_data", "bin"))
     for path in (work, sft, commands):
         path.mkdir()
+    patched_work_tree(work)
     (sft / "attacker_rewrite_1180_rl_continuation.jsonl").write_text("{}\n")
     pids = tmp_path / "service_pids"
     trained = tmp_path / "trained"
@@ -195,6 +207,7 @@ def test_shared_binary_configures_the_topic_judge_before_the_reward_contract(tmp
     work, sft, commands = (tmp_path / name for name in ("work", "sft_data", "bin"))
     for path in (work, sft, commands):
         path.mkdir()
+    patched_work_tree(work)
     (sft / "attacker_rewrite_1180_rl_continuation.jsonl").write_text("{}\n")
     trained = tmp_path / "trained"
     wrapper = commands / "python"
@@ -262,6 +275,7 @@ def test_anthropic_backend_refuses_to_start_without_a_key(tmp_path):
     work, sft, commands = (tmp_path / name for name in ("work", "sft_data", "bin"))
     for path in (work, sft, commands):
         path.mkdir()
+    patched_work_tree(work)
     (sft / "attacker_rewrite_1180_rl_continuation.jsonl").write_text("{}\n")
     wrapper = commands / "python"
     executable(wrapper, "exec " + shlex.quote(sys.executable) + ' "$@"\n')
@@ -366,6 +380,7 @@ def _judge_placement_run(tmp_path, gpus, overrides=None):
     work, sft, commands = (tmp_path / name for name in ("work", "sft_data", "bin"))
     for path in (work, sft, commands):
         path.mkdir()
+    patched_work_tree(work)
     (sft / "attacker_rewrite_1180_rl_continuation.jsonl").write_text("{}\n")
     trained = tmp_path / "trained"
     wrapper = commands / "python"
@@ -454,3 +469,35 @@ def test_the_run_records_per_card_memory(tmp_path):
     # 0.35 + 0.45 that did not fit.
     *_, result = _judge_placement_run(tmp_path, gpus=4)
     assert "GPU memory after judges" in result.stdout
+
+
+def test_shared_binary_refuses_a_work_tree_without_the_reward_patch(tmp_path):
+    """The shared reward reaches training only through a patch injected into
+    the working copy of language_game.py. A tree prepared before that patch
+    existed trains on the LEGACY reward while every banner still says
+    shared_binary -- silently wrong results, worse than a failed run."""
+    work, sft, commands = (tmp_path / name for name in ("work", "sft_data", "bin"))
+    for path in (work, sft, commands):
+        path.mkdir()
+    (sft / "attacker_rewrite_1180_rl_continuation.jsonl").write_text("{}\n")
+    # a work tree with the file but WITHOUT the patch
+    loop = work / "openrlhf/trainer/ppo_utils"
+    loop.mkdir(parents=True)
+    (loop / "language_game.py").write_text("reward += get_cot_formatting_reward(x)\n")
+    executable(commands / "python", "exec " + shlex.quote(sys.executable) + ' "$@"\n')
+    executable(commands / "curl", "echo '{\"ok\":true}'\n")
+    executable(commands / "ray", "exit 0\n")
+    environment = dict(os.environ, PATH=f"{commands}:{os.environ['PATH']}",
+        SSP_ROOT=str(tmp_path), SSP_PYTHON=str(commands / "python"), SSP_WORK=str(work),
+        SSP_SFT_DIR=str(sft), SSP_OUT=str(tmp_path / "psro"),
+        BASE_MODEL_PATH=str(tmp_path), JUDGE_MODEL_PATH=str(tmp_path),
+        ROLE="attacker", GEN="1", TAG="A1", DRY_RUN="0",
+        GAME_REWARD_MODE="shared_binary", TOPIC_JUDGE_BACKEND="local",
+        RAY_BIN=str(commands / "ray"), RAY_PORT=str(50000 + os.getpid() % 10000))
+    for name in ("TOPIC_API_MODEL", "TOPIC_API_KEY", "TOPIC_API_KEY_FILE"):
+        environment.pop(name, None)
+    result = subprocess.run(["bash", str(ROOT / "scripts/slurm/role_phase.sh")],
+                            env=environment, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 1
+    assert "compute_shared_game_reward" in result.stderr
+    assert "prepare_sources.py" in result.stderr        # tells you the remedy
