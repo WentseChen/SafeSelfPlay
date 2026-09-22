@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -46,6 +47,50 @@ def wait_for_topic_service(process, env: dict[str, str], log_path: Path) -> None
             pass
         time.sleep(5)
     raise RuntimeError(f"Local topic judge did not become ready; see {log_path}")
+
+
+@contextlib.contextmanager
+def local_topic_service(env: dict[str, str], repo: Path):
+    """Own one local judge for the whole run, then hand it to every child.
+
+    Training phases start and stop their own judge, but PSRO cells do not: a
+    payoff cell worker just calls the topic API and dies with "Topic API
+    request failed or timed out" if nothing is listening. The container solved
+    this by wrapping the coordinator in run_with_local_topic; the bare
+    scripts/slurm path had no equivalent, so the matrix stage could not run at
+    all with the local backend.
+
+    Sets TOPIC_JUDGE_MANAGED=1 so role_phase.sh reuses this service instead of
+    starting a second engine on the same card.
+    """
+    port = int(env["TOPIC_JUDGE_PORT"])
+    try:
+        with socket.socket() as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            probe.bind(("127.0.0.1", port))
+    except OSError as exc:
+        raise RuntimeError(
+            f"Topic judge port {port} is already in use ({exc.strerror}); stop the stale "
+            f"judge or set TOPIC_JUDGE_PORT."
+        ) from exc
+    log_path = Path(env["SSP_ROOT"]) / "topic_judge.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    service = None
+    try:
+        with log_path.open("ab") as log:
+            service_env = dict(env, CUDA_VISIBLE_DEVICES=env.get("TOPIC_JUDGE_GPU", "3"),
+                               VLLM_USE_V1="0", TOPIC_JUDGE_NAME=env["TOPIC_API_MODEL"])
+            service = subprocess.Popen(
+                [env["SSP_PYTHON"], str(repo / "scripts/slurm/serve_topic_judge.py")],
+                env=service_env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
+            )
+            wait_for_topic_service(service, env, log_path)
+            env["TOPIC_JUDGE_MANAGED"] = "1"
+            os.environ["TOPIC_JUDGE_MANAGED"] = "1"
+            yield service
+    finally:
+        os.environ.pop("TOPIC_JUDGE_MANAGED", None)
+        stop_process_group(service)
 
 
 def run_with_local_topic(command: list[str], env: dict[str, str], repo: Path) -> int:

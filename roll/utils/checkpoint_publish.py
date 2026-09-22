@@ -14,6 +14,14 @@ from pathlib import Path
 from typing import Any, Callable
 
 
+def _hub_id(path: str) -> str:
+    """Recover `org/name` from a local snapshot path, for a usable record."""
+    for part in Path(path).parts:
+        if part.startswith("models--"):
+            return part.removeprefix("models--").replace("--", "/", 1)
+    return path
+
+
 def checkpoint_publish_target() -> str:
     return os.environ.get("HF_CHECKPOINT_REPO", "").strip()
 
@@ -56,13 +64,19 @@ def publish_role_checkpoint(
         metadata = {
             "run_suffix": run_suffix, "target": target, "role": role,
             "checkpoint": checkpoint.name,
-            "base_model": os.environ.get("BASE_MODEL_PATH", ""),
+            "base_model": _hub_id(os.environ.get("BASE_MODEL_PATH", "")),
             **(extra or {}),
         }
         api.upload_folder(
             repo_id=repo_id, repo_type="model", folder_path=str(checkpoint),
             path_in_repo=path_in_repo,
             commit_message=f"{run_suffix}: final {target} ({role}) checkpoint",
+            # PEFT writes a README.md whose `base_model:` is the ABSOLUTE LOCAL
+            # path the adapter was trained from. That is not a model id, so the
+            # Hub rejects the whole commit with "Invalid metadata in README.md"
+            # and no part of the checkpoint lands. The card says nothing our
+            # metadata file does not, so leave it behind.
+            ignore_patterns=["README.md"],
         )
         api.upload_file(
             repo_id=repo_id, repo_type="model",

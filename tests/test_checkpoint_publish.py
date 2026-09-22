@@ -114,3 +114,31 @@ def test_the_trainer_publishes_the_final_checkpoint():
     guard = source.index("finished without {checkpoint}")
     early = source.index("stopped early; final checkpoint is")
     assert early < guard < hook
+
+
+def test_the_peft_card_is_not_uploaded(adapter, monkeypatch):
+    """PEFT writes README.md with `base_model:` set to the absolute local path
+    it trained from. That is not a model id, so the Hub rejects the entire
+    commit with "Invalid metadata in README.md" and nothing lands."""
+    (adapter / "README.md").write_text("---\nbase_model: /abs/local/path/\n---\n")
+    recorder = {}
+    monkeypatch.setenv("HF_CHECKPOINT_REPO", "org/repo")
+    monkeypatch.setenv("HF_TOKEN", "t")
+    monkeypatch.setitem(sys.modules, "huggingface_hub", _api(recorder))
+    publish.publish_role_checkpoint(
+        adapter, run_suffix="r", target="A1", role="attacker", log=lambda _: None)
+    assert "README.md" in recorder["folder"]["ignore_patterns"]
+
+
+def test_metadata_records_a_usable_model_id(adapter, monkeypatch):
+    recorder = {}
+    monkeypatch.setenv("HF_CHECKPOINT_REPO", "org/repo")
+    monkeypatch.setenv("HF_TOKEN", "t")
+    monkeypatch.setenv(
+        "BASE_MODEL_PATH",
+        "/scratch/hf/hub/models--mlabonne--Meta-Llama-3.1-8B-Instruct-abliterated/snapshots/368c/")
+    monkeypatch.setitem(sys.modules, "huggingface_hub", _api(recorder))
+    publish.publish_role_checkpoint(
+        adapter, run_suffix="r", target="A1", role="attacker", log=lambda _: None)
+    meta = json.loads(recorder["file"]["path_or_fileobj"])
+    assert meta["base_model"] == "mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated"

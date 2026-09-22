@@ -3,6 +3,7 @@
 import importlib.util
 from pathlib import Path
 import signal
+import os
 import sys
 from types import SimpleNamespace
 
@@ -112,3 +113,80 @@ def test_a_busy_topic_judge_port_explains_itself(tmp_path, monkeypatch):
     assert "TOPIC_JUDGE_PORT" in message        # how to proceed
     # and it must not quietly adopt whatever is already answering there
     assert "did not start" in message
+
+
+def test_the_drivers_resolve_the_local_judge_before_the_contract(monkeypatch):
+    """shared_game_reward_contract() resolves the topic judge config, which
+    role_phase.sh only sets later. history_selfplay died before training and
+    cold_psro_local died AFTER a role had finished -- discarding a completed
+    oracle -- while the container survived because its entrypoint exports the
+    same values first."""
+    from roll.utils.shared_game_reward import shared_game_reward_contract
+    from roll.utils.topic_api import configure_local_topic_backend
+
+    monkeypatch.setenv("GAME_REWARD_MODE", "shared_binary")
+    monkeypatch.setenv("TOPIC_JUDGE_BACKEND", "local")
+    monkeypatch.setenv("JUDGE_PORT", "5591")
+    for name in ("TOPIC_API_PROVIDER", "TOPIC_API_BASE_URL", "TOPIC_API_MODEL",
+                 "TOPIC_API_KEY", "TOPIC_API_KEY_FILE", "TOPIC_JUDGE_PORT"):
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(Exception):
+        shared_game_reward_contract()
+    configure_local_topic_backend()
+    contract = shared_game_reward_contract()["topic_judge"]
+    assert contract["provider"] == "openai_compatible"
+    assert contract["model"] == "local-topic-judge"
+    # role_phase.sh uses JUDGE_PORT + 300; the base URL is part of the public
+    # contract, so a mismatch would look like a contract change on resume.
+    assert contract["base_url"].endswith(":5891/v1")
+    assert "127.0.0.1" not in contract["base_url"]
+
+
+def test_an_existing_configuration_is_left_alone(monkeypatch):
+    from roll.utils.topic_api import configure_local_topic_backend
+
+    monkeypatch.setenv("GAME_REWARD_MODE", "shared_binary")
+    monkeypatch.setenv("TOPIC_JUDGE_BACKEND", "local")
+    monkeypatch.setenv("TOPIC_API_MODEL", "frozen-local-model")
+    monkeypatch.setenv("TOPIC_API_KEY", "local")
+    monkeypatch.setenv("TOPIC_API_BASE_URL", "http://127.0.0.1:5410/v1")
+    configure_local_topic_backend()
+    assert os.environ["TOPIC_API_MODEL"] == "frozen-local-model"
+    assert os.environ["TOPIC_API_BASE_URL"] == "http://127.0.0.1:5410/v1"
+
+
+def test_the_hosted_backend_is_not_touched(monkeypatch):
+    from roll.utils.topic_api import configure_local_topic_backend
+
+    monkeypatch.setenv("GAME_REWARD_MODE", "shared_binary")
+    monkeypatch.setenv("TOPIC_JUDGE_BACKEND", "anthropic")
+    monkeypatch.delenv("TOPIC_API_PROVIDER", raising=False)
+    configure_local_topic_backend()
+    assert "TOPIC_API_PROVIDER" not in os.environ
+
+
+def test_the_run_scoped_judge_uses_the_colocated_budget():
+    """serve_topic_judge.py defaults to 0.60 of the card, which is right for a
+    dedicated engine and catastrophic for one sharing a card with the trainable
+    engine, the opponent and a ZeRO-3 shard -- it surfaces as an opaque NCCL
+    'unhandled cuda error' at init, not as an OOM."""
+    driver = Path("scripts/slurm/cold_psro_local.py").read_text()
+    block = driver[driver.index("local_topic_service"):]
+    block = block[:block.index("actions = 0")]
+    assert 'setdefault("TOPIC_JUDGE_UTIL", "0.13")' in block
+    assert 'setdefault("TOPIC_JUDGE_MAX_LEN", "4096")' in block
+    # and it must not land on WildGuard's card (GPU 0)
+    assert 'TOPIC_JUDGE_GPU' in block and 'cfg.gpus - 1' in block
+
+
+def test_the_run_scoped_judge_does_not_sit_on_a_cell_worker_card():
+    """Cell workers take GPUs 1..cell_workers and the cell judge takes GPU 0.
+    A judge left on GPU 1 puts ~18 GiB on a cell worker's card, and the cell
+    dies with a plain CUDA OOM that names neither the judge nor the layout.
+    The container's entrypoint already drops to 2 cell workers with the judge
+    on GPU 3; the bare driver has to do the same."""
+    driver = Path("scripts/slurm/cold_psro_local.py").read_text()
+    block = driver[driver.index("local_topic_service"):]
+    block = block[:block.index("actions = 0")]
+    assert 'TOPIC_JUDGE_GPU", str(max(cfg.gpus - 1, 0))' in block
+    assert "cfg.cell_workers = max(cfg.gpus - 2, 1)" in block

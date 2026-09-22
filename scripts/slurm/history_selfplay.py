@@ -24,6 +24,7 @@ from cold_psro_local import Config, early_stop_configuration, make_local_oracle_
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from roll.utils.history_selfplay import history_schedule
 from roll.utils.shared_game_reward import shared_game_reward_enabled, shared_game_reward_contract
+from roll.utils.topic_api import configure_local_topic_backend
 from roll.utils.role_lora_cold_psro import opponent_pool
 
 
@@ -116,6 +117,9 @@ def run_baseline(psro: Any, cfg: Any, train: Any, *, method: str, rounds: int, s
 
 
 def main(argv=None) -> int:
+    # Before anything reads the reward contract; role_phase.sh only configures
+    # the local judge later, inside the training phase.
+    configure_local_topic_backend()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--method", choices=("uniform", "naive"), required=True)
     parser.add_argument("--run-suffix", required=True)
