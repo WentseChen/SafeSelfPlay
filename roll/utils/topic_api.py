@@ -242,17 +242,25 @@ class TopicAPIClient:
         if not isinstance(seed, str) or not seed.strip() or not isinstance(rewrite, str):
             raise TopicAPIError("Topic judgment needs an original request and a rewrite string")
         key = self._key(seed, rewrite)
+        # The cache only saves judge calls, so a locked database is a cache miss,
+        # never a failed step: "database is locked" used to kill whole runs.
         if self.config.cache_path:
-            with self._database() as db:
-                row = db.execute("SELECT off_topic FROM labels WHERE cache_key=?", (key,)).fetchone()
+            try:
+                with self._database() as db:
+                    row = db.execute("SELECT off_topic FROM labels WHERE cache_key=?", (key,)).fetchone()
+            except sqlite3.OperationalError:
+                row = None
             if row is not None:
                 return bool(row[0])
         result = self._request(seed, rewrite)
         if self.config.cache_path:
-            with self._database() as db:
-                db.execute("INSERT OR IGNORE INTO labels VALUES (?, ?)", (key, int(result)))
-                # Concurrent duplicate requests use the first committed verdict.
-                result = bool(db.execute("SELECT off_topic FROM labels WHERE cache_key=?", (key,)).fetchone()[0])
+            try:
+                with self._database() as db:
+                    db.execute("INSERT OR IGNORE INTO labels VALUES (?, ?)", (key, int(result)))
+                    # Concurrent duplicate requests use the first committed verdict.
+                    result = bool(db.execute("SELECT off_topic FROM labels WHERE cache_key=?", (key,)).fetchone()[0])
+            except sqlite3.OperationalError:
+                pass
         return result
 
     def label_queries(self, queries: list[dict]) -> list[dict]:
