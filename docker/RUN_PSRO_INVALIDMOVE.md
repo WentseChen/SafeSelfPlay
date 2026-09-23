@@ -95,3 +95,15 @@ attacker 成功率 0.33 → 0.8，非法动作 0.38 → 0.02。上一轮 `shared
 2. 训练中每 50 step 把最新 checkpoint 上传到 `<suffix>/<A_k>/latest/`（覆盖）。
 3. 每算完一个收益格，上传 `<run>/state.json` 和 `<run>/matrices/`。
 4. 不要上传基座权重、`wandb/`、`topic_labels.sqlite3` 或任何 key。
+
+## 镜像信息
+
+| 项目 | 值 |
+| --- | --- |
+| 镜像 | `ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260923-v2` |
+| digest | `sha256:f6331a3846a22377bbdfda2ad3a43c46d45f2ee96bdae3c5b07090e16778cc22` |
+| 构建 commit（`check` 应显示） | `0356ca35ef3fc46d9b6030066db9f41b9e9dff47` |
+| 默认配置 | `GAME_REWARD_MODE=legacy`、`ATTACKER_INVALID_MOVE=1`、`RACE_CELLS=1`、4×H200 |
+| 镜像内已验证 | 矩阵版本 `…-v4+invalid-move-v1`；偏题且有害的对局矩阵收益 -1.0；训练 game loop 含非法动作规则；W&B 上传失败不会中断训练 |
+
+旧标签 `…-invalidmove-20260923`（无 `-v2`）不含矩阵修正，**不要使用**。
