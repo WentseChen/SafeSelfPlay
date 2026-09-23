@@ -1,7 +1,7 @@
 # PSRO 两个 seed 运行说明（invalid-move reward，4×H200）
 
 本次只跑 **PSRO**，两个 seed：`8888` 和 `8889`。
-代码：分支 `wentse/v6d-invalid-move-reward`（commit `03fc5c5` 起）。镜像已预先构建，**不需要 build**。
+代码：分支 `wentse/v6d-invalid-move-reward`。镜像 `-v2` 含训练 reward、矩阵非法动作 -1、racing 默认。镜像已预先构建，**不需要 build**。
 
 > 注意：上一轮的 psro-a / psro-b 两个 run 实际都是 seed 8888（W&B config 里 `seed=8888`），
 > 并不是两个 seed。本次用 `TRAINING_SEED` 显式区分。
@@ -20,10 +20,10 @@ git clone -b wentse/v6d-invalid-move-reward https://github.com/xudongwu-0/SafeSe
 cd SafeSelfPlay
 
 docker login ghcr.io          # 镜像为私有时需要；token 需 read:packages
-docker pull ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260923
-docker tag  ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260923 \
-            safeselfplay:llama8b-h200-invalidmove-20260923
-export SSP_IMAGE=safeselfplay:llama8b-h200-invalidmove-20260923
+docker pull ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260923-v2
+docker tag  ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260923-v2 \
+            safeselfplay:llama8b-h200-invalidmove-20260923-v2
+export SSP_IMAGE=safeselfplay:llama8b-h200-invalidmove-20260923-v2
 ```
 
 ## 2. 环境变量
@@ -47,7 +47,7 @@ bash docker/run_llama8b.sh prepare
 bash docker/run_llama8b.sh check
 ```
 
-`check` 输出里 reward mode 必须是 `legacy`，镜像 commit 为 `03fc5c5…`。不是的话停下，镜像不对。
+`check` 输出里 reward mode 必须是 `legacy`，镜像 commit 必须与本文件末尾「镜像信息」一致。不是的话停下，镜像不对。
 
 ## 4. 启动（每个节点一个 seed）
 

@@ -101,7 +101,7 @@ df -h "$HOME/safeselfplay-data"
 tar -xzf safeselfplay-llama8b-h200-labels.build.tar.gz
 docker load -i safeselfplay-llama8b-h200-labels.image.tar.gz
 cd SafeSelfPlay-llama8b-h200
-export SSP_IMAGE=safeselfplay:llama8b-h200-invalidmove-20260923
+export SSP_IMAGE=safeselfplay:llama8b-h200-invalidmove-20260923-v2
 export SSP_DOCKER_WORKSPACE="$HOME/safeselfplay-data"
 export GPU_DEVICES=0,1,2,3
 ```
