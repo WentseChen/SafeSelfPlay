@@ -20,7 +20,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture(autouse=True)
 def restore_reward_environment(monkeypatch):
-    # main() exports defaults before exec; isolate that mutation in CPU tests.
+    # main() exports its whole resolved environment (reward flags, managed
+    # topic-judge endpoint, placement) before exec. Snapshot and restore all of
+    # os.environ so none of it leaks into later test files.
+    saved = dict(os.environ)
     monkeypatch.setenv("GAME_REWARD_MODE", "legacy")
     monkeypatch.delenv("ATTACKER_INVALID_MOVE", raising=False)
     monkeypatch.setenv("TOPIC_PENALTY", "2")
@@ -28,6 +31,9 @@ def restore_reward_environment(monkeypatch):
     monkeypatch.setenv("TOPIC_API_PROVIDER", "anthropic")
     monkeypatch.setenv("TOPIC_API_BASE_URL", "https://api.anthropic.com")
     monkeypatch.setenv("TOPIC_API_MODEL", "claude-opus-5")
+    yield
+    os.environ.clear()
+    os.environ.update(saved)
 
 
 def test_new_container_recipe_defaults_to_the_invalid_move_reward(monkeypatch):
