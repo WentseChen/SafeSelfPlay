@@ -65,7 +65,11 @@ def environment() -> dict[str, str]:
                           ("TOPIC_JUDGE_BACKEND", "local"), ("TOPIC_API_PROVIDER", "anthropic"),
                           ("TOPIC_API_BASE_URL", "https://api.anthropic.com"),
                           ("TOPIC_API_MODEL", "claude-opus-5"),
-                          ("PSRO_MIDRUN_RESUME", "0"), ("LADDER_EARLY_STOP", "1")):
+                          ("PSRO_MIDRUN_RESUME", "0"), ("LADDER_EARLY_STOP", "1"),
+                          # Racing payoff estimation, as the v6d run: every pending cell
+                          # gets a 256-episode pilot and only the Nash-relevant rows and
+                          # columns are topped up to MATRIX_EPISODES (~3x fewer episodes).
+                          ("RACE_CELLS", "1")):
         env.setdefault(name, default)
     if env["TOPIC_JUDGE_BACKEND"] not in {"local", "anthropic"}:
         raise ValueError("TOPIC_JUDGE_BACKEND must be local or anthropic")
@@ -235,7 +239,7 @@ def record_run_settings(args, env: dict[str, str]) -> None:
         "GAME_REWARD_MODE": "legacy", "ATTACKER_INVALID_MOVE": "1",
         "TRAINING_SEED": "8888", "PROMPT_MAX_LEN": "2048", "GENERATE_MAX_LEN": "2048",
         "MICRO_TRAIN": "8", "MICRO_ROLLOUT": "8", "TRAIN_BATCH": "32", "ROLLOUT_BATCH": "128",
-        "SAVE_STEPS_CONTRACT": "10", "RACE_CELLS": "0", "RACE_FULL_EPISODES": "",
+        "SAVE_STEPS_CONTRACT": "10", "RACE_CELLS": "1", "RACE_FULL_EPISODES": "",
         "LADDER_EARLY_STOP": "1", "EARLY_STOP_WINDOW": "20",
         "ATK_MIN_DELTA": "0.01", "ATK_PATIENCE": "3", "ATK_MIN_STEP": "60",
         "ATK_CEILING_MAX": "0.30", "DEF_THRESHOLD": "0.01", "DEF_GUARD_MIN": "0.912",

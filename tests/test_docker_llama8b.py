@@ -43,6 +43,7 @@ def test_new_container_recipe_defaults_to_the_invalid_move_reward(monkeypatch):
     env = entrypoint().environment()
     assert env["GAME_REWARD_MODE"] == "legacy"
     assert env["ATTACKER_INVALID_MOVE"] == "1"
+    assert env["RACE_CELLS"] == "1"
     assert env["TOPIC_PENALTY"] == "2"
     assert env["TOPIC_JUDGE_BACKEND"] == "local"   # no credential needed; what the validated run used
     # The local backend points the client at the base model behind the shim.
@@ -72,6 +73,7 @@ def test_baked_image_defaults_use_the_current_local_recipe(monkeypatch):
         env = entrypoint().environment()
     assert env["TOPIC_JUDGE_BACKEND"] == "local"
     assert (env["GAME_REWARD_MODE"], env["ATTACKER_INVALID_MOVE"]) == ("legacy", "1")
+    assert env["RACE_CELLS"] == "1"
     assert env["TOPIC_PENALTY"] == "2"
     assert env["TOPIC_JUDGE_GPU"] == "3"
     assert env["TOPIC_JUDGE_UTIL"] == "0.13"
