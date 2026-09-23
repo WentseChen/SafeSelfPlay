@@ -54,18 +54,19 @@ bash docker/run_llama8b.sh check
 ```bash
 # 节点 1
 TRAINING_SEED=8888 RACE_CELLS=1 DETACH=1 CONTAINER_NAME=ssp-psro-s8888 \
-  bash docker/run_llama8b.sh psro --run-suffix "psro8_${RUN_LABELER}_inv1_s8888" --rounds 8 --steps-per-role 300
+  bash docker/run_llama8b.sh psro --run-suffix "psro8_${RUN_LABELER}_inv1_s8888" --rounds 8 --steps-per-role 300 --matrix-episodes 1000
 
 # 节点 2
 TRAINING_SEED=8889 RACE_CELLS=1 DETACH=1 CONTAINER_NAME=ssp-psro-s8889 \
-  bash docker/run_llama8b.sh psro --run-suffix "psro8_${RUN_LABELER}_inv1_s8889" --rounds 8 --steps-per-role 300
+  bash docker/run_llama8b.sh psro --run-suffix "psro8_${RUN_LABELER}_inv1_s8889" --rounds 8 --steps-per-role 300 --matrix-episodes 1000
 
 docker logs -f ssp-psro-s8888      # 看日志
 docker stop -t 180 ssp-psro-s8888  # 需要停止时
 ```
 
+`--matrix-episodes 1000`：每个收益格最多 1000 局（与论文一致；默认是 4000）。
 `RACE_CELLS=1`：收益矩阵用 racing 估计（与 Table 1 的 v6d 相同）：每格先跑 256 局 pilot，
-只有 Nash 相关的行 / 列补到 4000 局，矩阵总局数约为全量的 1/3。**必须从第一次启动就设置**，矩阵设置在 run 开始时写入，之后不能改。
+只有 Nash 相关的行 / 列补到 1000 局，矩阵总局数约为全量的 1/3。**必须从第一次启动就设置**，矩阵设置在 run 开始时写入，之后不能改。
 
 同一个 `--run-suffix` 重新执行同一条命令即可续跑；不要换 seed 或改参数后复用旧 suffix（会被拒绝）。
 
