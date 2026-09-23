@@ -7,6 +7,8 @@
 2026-09-23 版同步最新主分支，包含运行全程的本地 judge 服务、矩阵评估分卡、旧奖励补丁检测及 Hugging Face checkpoint 上传修复。
 更新后需重新执行 `build`，才能让容器使用新版代码。
 
+**本版（分支 `wentse/v6d-invalid-move-reward`）默认 reward 改为 v6d + attacker 非法动作固定惩罚，见第 2 节。镜像标签随之改为 `…-invalidmove-20260923`；已构建过旧镜像也必须重新 `build`，否则仍会运行旧代码。**
+
 训练模型：`mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated`。按顺序执行：**联网构建 → 选择 label → 下载模型 → 三组训练**。
 下列命令用于 Linux x86_64 / 4×H200 服务器的 Bash；Mac 用于下载和转交这个压缩包。
 
@@ -125,7 +127,7 @@ cd SafeSelfPlay-llama8b-h200
 进入代码目录后构建镜像：
 
 ```bash
-export SSP_IMAGE=safeselfplay:llama8b-h200-labels-20260923
+export SSP_IMAGE=safeselfplay:llama8b-h200-invalidmove-20260923
 export SSP_DOCKER_WORKSPACE="$HOME/safeselfplay-data"
 export GPU_DEVICES=0,1,2,3
 
@@ -139,20 +141,21 @@ bash docker/run_llama8b.sh build
 
 ## 2. 选择 label 模型：下面两种方式任选一种
 
-两种方式都使用 binary 标签：偏题 `true` 扣 2，不偏题 `false` 这一项为 0。
-WildGuard 继续判断有害性、拒答；训练和 PSRO 矩阵共用
-`R_A=(r_A-r_D)/4-2*b`，`R_D=-R_A`。
+默认 reward（无需设置）：v6d 奖励 + attacker 非法动作固定惩罚。
 
 ```bash
-export GAME_REWARD_MODE=shared_binary
-export TOPIC_PENALTY=2
+export GAME_REWARD_MODE=legacy          # 镜像默认值
+export ATTACKER_INVALID_MOVE=1          # 镜像默认值
 ```
 
-`TOPIC_PENALTY=2` 保持为默认值。当前 reward 版本为 `shared-terminal-binary-topic-v2`：
-`r_A,r_D` 保留各自的 CoT 格式奖励，再叠加偏题惩罚；未罚分的投影使用
-`[-1.5, 1.5]` 界，默认 attacker 总收益界为 `[-3.5, 1.5]`。
-恢复格式项后，不能沿用旧版“罚 2 即保证所有偏题对局都不占优”的解释。
-更新前的 v1 运行与新版奖励不同，请使用新的 `--run-suffix`，不要混用两版结果。
+- 保留 v6d 的全部奖励项（Self-RedTeam v2：改写标签一致 ±0.5、拒答 ±0.5、有害回复 ±1、自身 CoT 格式 ±1），defender 奖励与 v6d 完全相同。
+- attacker **非法动作**：改写后的有害性标签与 seed 不一致（benign↔harmful 任一方向，WildGuard 标签缺失也算），或 label 模型判定偏题，记 **-3**；两者同时出现记 **-4**；CoT 格式违规再 -2。与 defender 如何回复无关。
+- 合法动作最低 0（CoT 违规时 -2），因此任何非法动作都严格更差。WildGuard 无法分类的回复，attacker 最多得 0。
+- PSRO 矩阵沿用 v6d 的零和投影；偏题对局 attacker 扣 `OFFTOPIC_PENALTY`（默认 0.5，归一化单位）；benign→harmful 对局仍丢弃。
+- 为什么改：`shared_binary` 直接丢弃 benign→harmful 对局且对忠实的 benign 改写罚 -0.75，attacker 在 80–160 step 内把全部 benign seed 改成 harmful，PSRO 收益格收集不到 benign 局而停住。
+- 与旧版 `shared_binary` 结果不可混用，请使用新的 `--run-suffix`（下文统一为 `_inv1`）。需要旧行为时设 `ATTACKER_INVALID_MOVE=0 GAME_REWARD_MODE=shared_binary`。
+
+两种 label 方式都输出 binary 偏题标签（`true` = 偏题），供上面的非法动作判定和矩阵偏题惩罚使用。
 
 判定模型默认是 **方式 A（本地 Llama 8B abliterated）**，不需要任何 API key。
 
@@ -245,13 +248,13 @@ export HF_CHECKPOINT_PRIVATE=1
 
 ```bash
 # PSRO：8 轮，每角色最多 300 step + 原早停，Nash 混合对手
-bash docker/run_llama8b.sh psro --run-suffix "psro8_${RUN_LABELER}_run1" --rounds 8 --steps-per-role 300
+bash docker/run_llama8b.sh psro --run-suffix "psro8_${RUN_LABELER}_inv1" --rounds 8 --steps-per-role 300
 
 # Uniform history：8 轮，每角色最多 300 step + 原早停，历史对手等概率采样
-bash docker/run_llama8b.sh uniform --run-suffix "uniform8_${RUN_LABELER}_run1" --rounds 8 --steps-per-role 300
+bash docker/run_llama8b.sh uniform --run-suffix "uniform8_${RUN_LABELER}_inv1" --rounds 8 --steps-per-role 300
 
 # Naive self-play：6 轮，每角色最多 100 step + 原早停，只对战最新对手
-bash docker/run_llama8b.sh naive --run-suffix "naive6_${RUN_LABELER}_run1" --rounds 6 --steps-per-role 100
+bash docker/run_llama8b.sh naive --run-suffix "naive6_${RUN_LABELER}_inv1" --rounds 6 --steps-per-role 100
 ```
 
 Uniform 包含 base 策略，例如 D0/D1/D2 各以 1/3 概率被抽取，不平均模型权重。

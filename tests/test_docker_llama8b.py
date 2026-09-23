@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def restore_reward_environment(monkeypatch):
     # main() exports defaults before exec; isolate that mutation in CPU tests.
     monkeypatch.setenv("GAME_REWARD_MODE", "legacy")
+    monkeypatch.delenv("ATTACKER_INVALID_MOVE", raising=False)
     monkeypatch.setenv("TOPIC_PENALTY", "2")
     monkeypatch.setenv("TOPIC_JUDGE_BACKEND", "local")
     monkeypatch.setenv("TOPIC_API_PROVIDER", "anthropic")
@@ -29,11 +30,13 @@ def restore_reward_environment(monkeypatch):
     monkeypatch.setenv("TOPIC_API_MODEL", "claude-opus-5")
 
 
-def test_new_container_recipe_defaults_to_shared_binary_reward(monkeypatch):
+def test_new_container_recipe_defaults_to_the_invalid_move_reward(monkeypatch):
     monkeypatch.delenv("GAME_REWARD_MODE", raising=False)
+    monkeypatch.delenv("ATTACKER_INVALID_MOVE", raising=False)
     monkeypatch.delenv("TOPIC_PENALTY", raising=False)
     env = entrypoint().environment()
-    assert env["GAME_REWARD_MODE"] == "shared_binary"
+    assert env["GAME_REWARD_MODE"] == "legacy"
+    assert env["ATTACKER_INVALID_MOVE"] == "1"
     assert env["TOPIC_PENALTY"] == "2"
     assert env["TOPIC_JUDGE_BACKEND"] == "local"   # no credential needed; what the validated run used
     # The local backend points the client at the base model behind the shim.
@@ -62,6 +65,7 @@ def test_baked_image_defaults_use_the_current_local_recipe(monkeypatch):
                     image_env.setenv(key, value)
         env = entrypoint().environment()
     assert env["TOPIC_JUDGE_BACKEND"] == "local"
+    assert (env["GAME_REWARD_MODE"], env["ATTACKER_INVALID_MOVE"]) == ("legacy", "1")
     assert env["TOPIC_PENALTY"] == "2"
     assert env["TOPIC_JUDGE_GPU"] == "3"
     assert env["TOPIC_JUDGE_UTIL"] == "0.13"
@@ -324,3 +328,10 @@ def test_invalid_move_reward_runs_legacy_with_the_managed_topic_judge(monkeypatc
     assert env["TOPIC_JUDGE_MANAGED"] == "1"
     assert env["TOPIC_API_PROVIDER"] == "openai_compatible"
     assert "ATTACKER_INVALID_MOVE" in (ROOT / "docker/run_llama8b.sh").read_text()
+
+
+def test_invalid_move_reward_rejects_shared_binary(monkeypatch):
+    monkeypatch.setenv("ATTACKER_INVALID_MOVE", "1")
+    monkeypatch.setenv("GAME_REWARD_MODE", "shared_binary")
+    with pytest.raises(ValueError):
+        entrypoint().environment()

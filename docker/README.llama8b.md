@@ -7,12 +7,12 @@
 该版本由老师执行 `build` 下载依赖与上游数据，再执行 `prepare` 下载模型；
 源码包的 `START_HERE.md` 已按此顺序编排。下文的完整镜像导入方式适用于另行收到 `.image.tar.gz` 的情况。
 
-本次交付包含最新主分支的训练与矩阵共用 binary 偏题 reward（默认 `-2/0`），
+本次交付默认使用 v6d 奖励 + attacker 非法动作（标签漂移 / 偏题）固定惩罚 `-3/-4`，
 并适配 Claude Opus 5 的短 JSON 标签请求。先看包内 `START_HERE.md`，
 其中先选择本地模型或 Opus API 做 label，再执行三个训练命令。
 
 `.build.tar.gz` 是源码构建包；`.image.tar.gz` 是可 `docker load` 导入的完整镜像。
-本次发布源码构建包，在目标服务器构建后的镜像标签为 `safeselfplay:llama8b-h200-labels-20260923`。
+本次发布源码构建包，在目标服务器构建后的镜像标签为 `safeselfplay:llama8b-h200-invalidmove-20260923`。
 2026-09-23 版包含运行全程的本地 judge 服务、矩阵评估分卡、旧奖励补丁检测及 Hugging Face checkpoint 上传修复。
 源码构建版在老师的服务器安装依赖并执行检查，实际版本写入镜像内 `/opt/runtime-packages.txt`。
 构建脚本将 Git 提交写入 OCI `org.opencontainers.image.revision` 标签，便于核对重建结果。
@@ -72,20 +72,21 @@ vLLM 的旧版二进制依赖由基础镜像提供，请勿把它改成空白 Py
 
 ## 2. 选择 label 模型：下面两种方式任选一种
 
-两种方式都使用 binary 标签：偏题 `true` 扣 2，不偏题 `false` 这一项为 0。
-WildGuard 继续判断有害性、拒答；训练和 PSRO 矩阵共用
-`R_A=(r_A-r_D)/4-2*b`，`R_D=-R_A`。
+默认 reward（无需设置）：v6d 奖励 + attacker 非法动作固定惩罚。
 
 ```bash
-export GAME_REWARD_MODE=shared_binary
-export TOPIC_PENALTY=2
+export GAME_REWARD_MODE=legacy          # 镜像默认值
+export ATTACKER_INVALID_MOVE=1          # 镜像默认值
 ```
 
-`TOPIC_PENALTY=2` 保持为默认值。当前 reward 版本为 `shared-terminal-binary-topic-v2`：
-`r_A,r_D` 保留各自的 CoT 格式奖励，再叠加偏题惩罚；未罚分的投影使用
-`[-1.5, 1.5]` 界，默认 attacker 总收益界为 `[-3.5, 1.5]`。
-恢复格式项后，不能沿用旧版“罚 2 即保证所有偏题对局都不占优”的解释。
-更新前的 v1 运行与新版奖励不同，请使用新的 `--run-suffix`，不要混用两版结果。
+- 保留 v6d 的全部奖励项（Self-RedTeam v2：改写标签一致 ±0.5、拒答 ±0.5、有害回复 ±1、自身 CoT 格式 ±1），defender 奖励与 v6d 完全相同。
+- attacker **非法动作**：改写后的有害性标签与 seed 不一致（benign↔harmful 任一方向，WildGuard 标签缺失也算），或 label 模型判定偏题，记 **-3**；两者同时出现记 **-4**；CoT 格式违规再 -2。与 defender 如何回复无关。
+- 合法动作最低 0（CoT 违规时 -2），因此任何非法动作都严格更差。WildGuard 无法分类的回复，attacker 最多得 0。
+- PSRO 矩阵沿用 v6d 的零和投影；偏题对局 attacker 扣 `OFFTOPIC_PENALTY`（默认 0.5，归一化单位）；benign→harmful 对局仍丢弃。
+- 为什么改：`shared_binary` 直接丢弃 benign→harmful 对局且对忠实的 benign 改写罚 -0.75，attacker 在 80–160 step 内把全部 benign seed 改成 harmful，PSRO 收益格收集不到 benign 局而停住。
+- 与旧版 `shared_binary` 结果不可混用，请使用新的 `--run-suffix`（下文统一为 `_inv1`）。需要旧行为时设 `ATTACKER_INVALID_MOVE=0 GAME_REWARD_MODE=shared_binary`。
+
+两种 label 方式都输出 binary 偏题标签（`true` = 偏题），供上面的非法动作判定和矩阵偏题惩罚使用。
 
 判定模型默认是 **方式 A（本地 Llama 8B abliterated）**，不需要任何 API key。
 
@@ -187,13 +188,13 @@ bash docker/run_llama8b.sh check
 
 ```bash
 # 1. PSRO：A1/D1 到 A8/D8，最终含 base 的 9×9 收益矩阵
-bash docker/run_llama8b.sh psro --run-suffix "psro8_${RUN_LABELER}_run1" --rounds 8 --steps-per-role 300
+bash docker/run_llama8b.sh psro --run-suffix "psro8_${RUN_LABELER}_inv1" --rounds 8 --steps-per-role 300
 
 # 2. 新 baseline：历史对手均匀采样，A1/D1 到 A8/D8
-bash docker/run_llama8b.sh uniform --run-suffix "uniform8_${RUN_LABELER}_run1" --rounds 8 --steps-per-role 300
+bash docker/run_llama8b.sh uniform --run-suffix "uniform8_${RUN_LABELER}_inv1" --rounds 8 --steps-per-role 300
 
 # 3. Naive：只对战最新对手，A1/D1 到 A6/D6
-bash docker/run_llama8b.sh naive --run-suffix "naive6_${RUN_LABELER}_run1" --rounds 6 --steps-per-role 100
+bash docker/run_llama8b.sh naive --run-suffix "naive6_${RUN_LABELER}_inv1" --rounds 6 --steps-per-role 100
 ```
 
 实际入口是 `docker/run_llama8b.sh` → `docker/llama8b_entrypoint.py`。
@@ -212,7 +213,7 @@ rollout batch 128、train batch 32、micro batch 8。PSRO 每个收益格 4000 �
 训练完成时共 81 格；两个 baseline 不在训练期间额外求解收益矩阵。
 因此轮数相同也不代表三种方法的总算力相同。
 
-**当前源码预设统一设置 `GAME_REWARD_MODE=shared_binary`、`TOPIC_PENALTY=2`、
+**当前源码预设统一设置 `GAME_REWARD_MODE=legacy`、`ATTACKER_INVALID_MOVE=1`、
 `INIT_KL_COEF=0`、`OFFTOPIC_ENABLE=0`、`PSRO_MIDRUN_RESUME=0`。**
 当前 naive 继承权重的路径无法保持正 KL 惩罚始终参考 base，因此三组统一关闭 KL 惩罚；
 参考 KL 仍监控。偏题判定使用上方选定的本地模型或 Claude API；WildGuard 始终启用。
@@ -261,7 +262,7 @@ SAVE_STEPS_CONTRACT=1 bash docker/run_llama8b.sh uniform --run-suffix "${RUN_LAB
 ```text
 hf/                                              # 训练、WildGuard 及所选 label 模型缓存
 topic_judge.log                                   # 本地 label 服务日志
-psro/role_lora_zero_sum_psro/psro8_<labeler>_run1/
+psro/role_lora_zero_sum_psro/psro8_<labeler>_inv1/
   state.json                                     # 进度、策略池、收益格
   docker_run_settings.json                       # 本次容器实验设置，无 API key
   matrices/final_g8.json                          # 最终 9×9 矩阵及 Nash 概率
@@ -269,8 +270,8 @@ psro/role_lora_zero_sum_psro/psro8_<labeler>_run1/
   training/A1/training.log                        # 每阶段各有日志
   training/A1/early_stop.json                     # 窗口测量和停止原因
   training/A1/ckpt/global_step300_hf/              # 未早停时；早停则为实际 step
-selfplay_baselines/uniform/uniform8_<labeler>_run1/ # state.json / phases / training
-selfplay_baselines/naive/naive6_<labeler>_run1/     # 同上
+selfplay_baselines/uniform/uniform8_<labeler>_inv1/ # state.json / phases / training
+selfplay_baselines/naive/naive6_<labeler>_inv1/     # 同上
 ```
 
 PSRO 最终写入 `training_completed=true`；`completed` 仍为 false，
@@ -282,7 +283,7 @@ PSRO 产出的矩阵用于对手选择，不是独立 held-out benchmark。
 需要后台运行时，例如：
 
 ```bash
-DETACH=1 CONTAINER_NAME=ssp-psro8 bash docker/run_llama8b.sh psro --run-suffix "psro8_${RUN_LABELER}_run1" --rounds 8 --steps-per-role 300
+DETACH=1 CONTAINER_NAME=ssp-psro8 bash docker/run_llama8b.sh psro --run-suffix "psro8_${RUN_LABELER}_inv1" --rounds 8 --steps-per-role 300
 docker logs -f ssp-psro8
 # 需要停止时：
 docker stop -t 180 ssp-psro8

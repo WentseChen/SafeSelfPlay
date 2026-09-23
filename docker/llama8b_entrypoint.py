@@ -48,9 +48,18 @@ def environment() -> dict[str, str]:
         GPUS="4",
     )
     env["HF_HUB_CACHE"] = str(Path(env["HF_HOME"]) / "hub")
-    # The invalid-move reward is defined on the legacy (v6d) reward only.
-    if env.get("ATTACKER_INVALID_MOVE", "0") == "1":
+    # Default reward: the v6d (legacy) reward with the flat invalid-move floor
+    # for the attacker. The flag is defined on the legacy reward only.
+    # An explicit GAME_REWARD_MODE=shared_binary without the flag keeps it off.
+    env.setdefault("ATTACKER_INVALID_MOVE",
+                   "0" if env.get("GAME_REWARD_MODE") == "shared_binary" else "1")
+    if env["ATTACKER_INVALID_MOVE"] not in {"0", "1"}:
+        raise ValueError("ATTACKER_INVALID_MOVE must be 0 or 1")
+    if env["ATTACKER_INVALID_MOVE"] == "1":
         env.setdefault("GAME_REWARD_MODE", "legacy")
+        if env["GAME_REWARD_MODE"] != "legacy":
+            raise ValueError("ATTACKER_INVALID_MOVE=1 requires GAME_REWARD_MODE=legacy; "
+                             "set ATTACKER_INVALID_MOVE=0 to run shared_binary")
     for name, default in (("INIT_KL_COEF", "0"), ("OFFTOPIC_ENABLE", "0"),
                           ("GAME_REWARD_MODE", "shared_binary"), ("TOPIC_PENALTY", "2"),
                           ("TOPIC_JUDGE_BACKEND", "local"), ("TOPIC_API_PROVIDER", "anthropic"),
@@ -223,7 +232,7 @@ def record_run_settings(args, env: dict[str, str]) -> None:
     defaults = {
         "INIT_KL_COEF": "0", "OFFTOPIC_ENABLE": "0", "PSRO_MIDRUN_RESUME": "0",
         "OFFTOPIC_PENALTY": "0.5", "ATTACKER_OBJECTIVE": "",
-        "GAME_REWARD_MODE": "shared_binary", "ATTACKER_INVALID_MOVE": "0",
+        "GAME_REWARD_MODE": "legacy", "ATTACKER_INVALID_MOVE": "1",
         "TRAINING_SEED": "8888", "PROMPT_MAX_LEN": "2048", "GENERATE_MAX_LEN": "2048",
         "MICRO_TRAIN": "8", "MICRO_ROLLOUT": "8", "TRAIN_BATCH": "32", "ROLLOUT_BATCH": "128",
         "SAVE_STEPS_CONTRACT": "10", "RACE_CELLS": "0", "RACE_FULL_EPISODES": "",
