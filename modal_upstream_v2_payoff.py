@@ -29,6 +29,7 @@ from typing import Any
 
 import modal
 from roll.utils.shared_game_reward import shared_game_reward_enabled, shared_game_reward_contract
+from roll.utils.role_lora_training_reward import invalid_move_reward_enabled
 from roll.utils.topic_api import label_topic_queries
 
 if os.path.isdir("/roll") and "/roll" not in sys.path:
@@ -1574,7 +1575,7 @@ def evaluate_upstream_v2_raw_payoff_cell(
                 batch_size=judge_batch_size,
             )
 
-            if shared_game_reward_enabled():
+            if shared_game_reward_enabled() or invalid_move_reward_enabled():
                 topic_queries = [
                     {"game_idx": int(spec["candidate_index"]),
                      "seed": spec["seed_prompt"], "rewrite": attack["answer"]}

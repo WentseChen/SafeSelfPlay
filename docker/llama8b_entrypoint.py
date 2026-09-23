@@ -48,6 +48,9 @@ def environment() -> dict[str, str]:
         GPUS="4",
     )
     env["HF_HUB_CACHE"] = str(Path(env["HF_HOME"]) / "hub")
+    # The invalid-move reward is defined on the legacy (v6d) reward only.
+    if env.get("ATTACKER_INVALID_MOVE", "0") == "1":
+        env.setdefault("GAME_REWARD_MODE", "legacy")
     for name, default in (("INIT_KL_COEF", "0"), ("OFFTOPIC_ENABLE", "0"),
                           ("GAME_REWARD_MODE", "shared_binary"), ("TOPIC_PENALTY", "2"),
                           ("TOPIC_JUDGE_BACKEND", "local"), ("TOPIC_API_PROVIDER", "anthropic"),
@@ -57,7 +60,9 @@ def environment() -> dict[str, str]:
         env.setdefault(name, default)
     if env["TOPIC_JUDGE_BACKEND"] not in {"local", "anthropic"}:
         raise ValueError("TOPIC_JUDGE_BACKEND must be local or anthropic")
-    if env["GAME_REWARD_MODE"] == "shared_binary" and env["TOPIC_JUDGE_BACKEND"] == "local":
+    needs_topic_judge = (env["GAME_REWARD_MODE"] == "shared_binary"
+                         or env.get("ATTACKER_INVALID_MOVE", "0") == "1")
+    if needs_topic_judge and env["TOPIC_JUDGE_BACKEND"] == "local":
         port = int(env.get("TOPIC_JUDGE_PORT", "5410"))
         if not 1024 <= port <= 65535:
             raise ValueError("TOPIC_JUDGE_PORT must be between 1024 and 65535")
@@ -218,6 +223,7 @@ def record_run_settings(args, env: dict[str, str]) -> None:
     defaults = {
         "INIT_KL_COEF": "0", "OFFTOPIC_ENABLE": "0", "PSRO_MIDRUN_RESUME": "0",
         "OFFTOPIC_PENALTY": "0.5", "ATTACKER_OBJECTIVE": "",
+        "GAME_REWARD_MODE": "shared_binary", "ATTACKER_INVALID_MOVE": "0",
         "TRAINING_SEED": "8888", "PROMPT_MAX_LEN": "2048", "GENERATE_MAX_LEN": "2048",
         "MICRO_TRAIN": "8", "MICRO_ROLLOUT": "8", "TRAIN_BATCH": "32", "ROLLOUT_BATCH": "128",
         "SAVE_STEPS_CONTRACT": "10", "RACE_CELLS": "0", "RACE_FULL_EPISODES": "",

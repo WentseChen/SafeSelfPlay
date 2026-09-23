@@ -309,3 +309,18 @@ def test_build_stamps_the_commit(tmp_path):
     build_args = [args[i + 1] for i, a in enumerate(args) if a == "--build-arg"]
     assert any(a.startswith("SSP_GIT_SHA=") and a != "SSP_GIT_SHA=" for a in build_args)
     assert any(a.startswith("SSP_BUILD_DATE=") for a in build_args)
+
+
+def test_invalid_move_reward_runs_legacy_with_the_managed_topic_judge(monkeypatch):
+    # The flag is only defined on the legacy reward, and it needs the in-loop
+    # topic judge; without both the container would train on shared_binary or
+    # fail with "managed topic endpoint is missing".
+    monkeypatch.delenv("GAME_REWARD_MODE", raising=False)
+    monkeypatch.setenv("ATTACKER_INVALID_MOVE", "1")
+    for name in ("TOPIC_JUDGE_GPU", "JUDGE_GPU", "TOPIC_JUDGE_MANAGED"):
+        monkeypatch.delenv(name, raising=False)
+    env = entrypoint().environment()
+    assert env["GAME_REWARD_MODE"] == "legacy"
+    assert env["TOPIC_JUDGE_MANAGED"] == "1"
+    assert env["TOPIC_API_PROVIDER"] == "openai_compatible"
+    assert "ATTACKER_INVALID_MOVE" in (ROOT / "docker/run_llama8b.sh").read_text()
