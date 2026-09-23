@@ -10,6 +10,8 @@
 
 - Linux x86_64，单节点 4×H200，已装 NVIDIA 驱动、Docker、NVIDIA Container Toolkit（见 `QUICKSTART.source.llama8b.md` 第 0 节）。
 - 能访问 GitHub、ghcr.io、Hugging Face、W&B。
+- 工作目录（`SSP_DOCKER_WORKSPACE`）所在磁盘每个 seed 至少留 **150 GB**（模型约 35 GB；一个完整 8 代 run 约 65 GB checkpoint 与日志）。
+- GitHub 账号需能访问私有仓库 `xudongwu-0/SafeSelfPlay`；ghcr 镜像为私有时需被授权。
 - **每个 seed 占一个 4 卡节点**。两个 seed 并行就用两个节点；只有一个节点就先跑 seed 8888，结束后再跑 8889。
   不要在同一节点同时跑两个 run（会争 GPU 和 Ray 端口）。
 
@@ -47,7 +49,16 @@ bash docker/run_llama8b.sh prepare
 bash docker/run_llama8b.sh check
 ```
 
-`check` 输出里 reward mode 必须是 `legacy`，镜像 commit 必须与本文件末尾「镜像信息」一致。不是的话停下，镜像不对。
+`check` 会打印四张 GPU 和 `image build: git_sha=…`，该 commit 必须与本文件末尾「镜像信息」一致，不是的话停下，镜像不对。
+
+**上传权限预检（必须做，10 秒）**：`HF_TOKEN` 需要能**写** `xudongwu/SafeSelfPlay-checkpoints`，否则自动上传只会在日志里记一行 `checkpoint publish FAILED`，训练继续——上一轮就是这样一个 checkpoint 都没传上去。
+
+```bash
+docker run --rm --entrypoint bash -e HF_TOKEN -e NODE="$(hostname)" "$SSP_IMAGE" -c \
+  'echo "preflight $NODE" > /tmp/p.txt && huggingface-cli upload xudongwu/SafeSelfPlay-checkpoints /tmp/p.txt "_preflight/$NODE.txt"'
+```
+
+报错（401/403）就换一个对该仓库有 write 权限的 token，再开始训练。
 
 ## 4. 启动（每个节点一个 seed）
 
@@ -60,7 +71,7 @@ TRAINING_SEED=8888 RACE_CELLS=1 DETACH=1 CONTAINER_NAME=ssp-psro-s8888 \
 TRAINING_SEED=8889 RACE_CELLS=1 DETACH=1 CONTAINER_NAME=ssp-psro-s8889 \
   bash docker/run_llama8b.sh psro --run-suffix "psro8_${RUN_LABELER}_inv1_s8889" --rounds 8 --steps-per-role 300
 
-docker logs -f ssp-psro-s8888      # 看日志
+docker logs -f ssp-psro-s8888      # 看日志；第一行应为 `Starting psro: …; reward mode=legacy`
 docker stop -t 180 ssp-psro-s8888  # 需要停止时
 ```
 
@@ -78,8 +89,8 @@ docker stop -t 180 ssp-psro-s8888  # 需要停止时
 | 阶段结束 | W&B 显示 `crashed` | 早停正常现象；`training/<A_k>/early_stop.json` 里 `returncode=0` 即正常 | `returncode≠0` → 看 `training.log` 末尾 |
 | A1 结束后 | 进入矩阵计算，约 1 小时内开始 D1 | 出现新的 D1 W&B run | 卡在矩阵数小时无新 run → 看 `<workspace>/psro/role_lora_zero_sum_psro/<suffix>/logs/cells/*.log` |
 
-在我们的 2×H200 测试里（同一 reward，A1 vs D0，截至约 80 step；完整 200 step 结果待补），benign 数量保持稳定，
-attacker 成功率 0.33 → 0.8，非法动作 0.38 → 0.02。上一轮 `shared_binary` 在 80–160 step 内 benign 降到 0，导致矩阵卡住。
+在我们的 2×H200 测试里（同一 reward，A1 vs D0，截至 151 step），每批 benign 数量稳定在 26–36，
+attacker 成功率 0.33 → 0.96，非法动作 0.38 → 0.02；用 step 40 checkpoint 算的 512 局收益格只需 516 个候选即填满（benign 漂移 0.8%）。上一轮 `shared_binary` 在 80–160 step 内 benign 降到 0，导致矩阵卡住。
 
 ## 6. Checkpoint 上传规则
 
