@@ -1125,7 +1125,8 @@ def main() -> int:
     # with "Topic API request failed or timed out". Own one judge for the whole
     # run, as the container's entrypoint already does.
     judge_context = contextlib.nullcontext()
-    if (shared_game_reward_enabled()
+    from roll.utils.role_lora_training_reward import invalid_move_reward_enabled
+    if ((shared_game_reward_enabled() or invalid_move_reward_enabled())
             and os.environ.get("TOPIC_JUDGE_BACKEND", "local") == "local"
             and os.environ.get("TOPIC_JUDGE_MANAGED") != "1"):
         from roll.utils.local_topic_runtime import local_topic_service

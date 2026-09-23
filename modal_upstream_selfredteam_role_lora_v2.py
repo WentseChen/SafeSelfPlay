@@ -1945,6 +1945,45 @@ def _prepare_lora_v2_upstream() -> None:
     _patch_exact_prompt_label_balance()
     _patch_asymmetric_label_drift_training()
     _patch_shared_game_reward_metrics()
+    _patch_nonfatal_wandb_uploads()
+
+
+def _patch_nonfatal_wandb_uploads() -> None:
+    """A slow W&B backend must not end a training phase.
+
+    The per-step conversation tables are large uploads; one that waited more
+    than 30s on the backend raised out of the training loop and killed a
+    300-step phase (uniform A2, 2026-09-23).  Logging is a side effect: warn
+    and keep training.
+    """
+    actor_path = UPSTREAM_WORK / "openrlhf/trainer/ray/ppo_actor.py"
+    for call, label in (
+        ("self._log_game_tables(global_step, kwargs['game_history'])", "game tables"),
+        ("self._log_response_tables(global_step, kwargs['replay_buffer'])", "response tables"),
+    ):
+        _replace_once(
+            actor_path,
+            f"                    {call}\n",
+            (
+                "                    try:\n"
+                f"                        {call}\n"
+                "                    except Exception as exc:  # W&B upload is best-effort\n"
+                f"                        print(f\"[warn] W&B {label} upload failed at step {{global_step}}: {{exc!r}}\", flush=True)\n"
+            ),
+            f"non-fatal W&B {label}",
+        )
+    _replace_once(
+        actor_path,
+        "\n                self._wandb.log(logs)\n            # TensorBoard\n",
+        (
+            "\n                try:\n"
+            "                    self._wandb.log(logs)\n"
+            "                except Exception as exc:  # W&B upload is best-effort\n"
+            "                    print(f\"[warn] W&B metric log failed at step {global_step}: {exc!r}\", flush=True)\n"
+            "            # TensorBoard\n"
+        ),
+        "non-fatal W&B metric log",
+    )
 
 
 def _adapter_checkpoint(path: Path) -> bool:
