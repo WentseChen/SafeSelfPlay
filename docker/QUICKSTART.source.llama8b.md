@@ -153,7 +153,7 @@ export ATTACKER_INVALID_MOVE=1          # 镜像默认值
 - 保留 v6d 的全部奖励项（Self-RedTeam v2：改写标签一致 ±0.5、拒答 ±0.5、有害回复 ±1、自身 CoT 格式 ±1），defender 奖励与 v6d 完全相同。
 - attacker **非法动作**：改写后的有害性标签与 seed 不一致（benign↔harmful 任一方向，WildGuard 标签缺失也算），或 label 模型判定偏题，记 **-3**；两者同时出现记 **-4**；CoT 格式违规再 -2。与 defender 如何回复无关。
 - 合法动作最低 0（CoT 违规时 -2），因此任何非法动作都严格更差。WildGuard 无法分类的回复，attacker 最多得 0。
-- PSRO 矩阵沿用 v6d 的零和投影；偏题对局 attacker 扣 `OFFTOPIC_PENALTY`（默认 0.5，归一化单位）；benign→harmful 对局仍丢弃。
+- PSRO 矩阵沿用 v6d 的零和投影，但与训练一致：偏题、harmful seed 被改成非 harmful（或无标签）的对局，attacker 收益固定为 -1（收益区间下界，合法对局最低 -0.75）；benign→harmful 对局仍丢弃。矩阵版本号为 `role-lora-psro-terminal-projection-v4+invalid-move-v1`。
 - 为什么改：`shared_binary` 直接丢弃 benign→harmful 对局且对忠实的 benign 改写罚 -0.75，attacker 在 80–160 step 内把全部 benign seed 改成 harmful，PSRO 收益格收集不到 benign 局而停住。
 - 与旧版 `shared_binary` 结果不可混用，请使用新的 `--run-suffix`（下文统一为 `_inv1`）。需要旧行为时设 `ATTACKER_INVALID_MOVE=0 GAME_REWARD_MODE=shared_binary`。
 

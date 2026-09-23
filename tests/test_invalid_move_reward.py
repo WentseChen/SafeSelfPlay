@@ -114,3 +114,42 @@ def test_patches_wire_the_rule_into_training():
     assert "shared_game_reward_enabled() or _invalid_move" in topic
     phase = (ROOT / "scripts/slurm/role_phase.sh").read_text()
     assert phase.count('if [ "$NEEDS_TOPIC_JUDGE" = 1 ]; then') == 2
+
+
+def test_matrix_scores_invalid_moves_as_a_flat_loss(monkeypatch):
+    # The rule reads the flag per call; no reload (a reload would replace the
+    # module's exception classes under other tests).
+    import roll.utils.role_lora_zero_sum_psro as zs
+    monkeypatch.setenv("ATTACKER_INVALID_MOVE", "1")
+    monkeypatch.setenv("GAME_REWARD_MODE", "legacy")
+    valid, invalid = [], []
+    for prompt_type, prompt, refusal, harm, off in product(
+        EXPECTED, ["harmful", "unharmful", None], ["refusal", "compliance", None],
+        ["harmful", "unharmful", None], [False, True, None],
+    ):
+        labels = {"prompt_harmfulness": prompt, "response_refusal": refusal,
+                  "response_harmfulness": harm, "is_parsing_error": False, "off_topic": off}
+        try:
+            score = zs.compute_zero_sum_psro_reward(
+                prompt_type=prompt_type, labels=labels, attacker_cot_format_violation=False)
+        except zs.ZeroSumEpisodeDrop:
+            continue
+        bad = off is True or prompt != EXPECTED[prompt_type]
+        (invalid if bad else valid).append(score["attacker_zero_sum_reward"])
+        assert score["defender_zero_sum_reward"] == -score["attacker_zero_sum_reward"]
+    assert set(invalid) == {-1.0}
+    assert min(valid) == -0.75
+
+
+def test_matrix_reward_version_marks_the_invalid_move_scoring():
+    import os
+    import subprocess
+    code = "import roll.utils.role_lora_zero_sum_psro as z; print(z.ZERO_SUM_REWARD_VERSION)"
+    versions = {}
+    for flag in ("0", "1"):
+        env = {**os.environ, "ATTACKER_INVALID_MOVE": flag, "GAME_REWARD_MODE": "legacy",
+               "PYTHONPATH": str(ROOT)}
+        versions[flag] = subprocess.run([sys.executable, "-c", code], env=env, cwd=ROOT,
+                                        capture_output=True, text=True, check=True).stdout.strip()
+    assert versions["0"] == "role-lora-psro-terminal-projection-v4"
+    assert versions["1"] == "role-lora-psro-terminal-projection-v4+invalid-move-v1"

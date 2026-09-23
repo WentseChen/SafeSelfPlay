@@ -26,8 +26,13 @@ from .shared_game_reward import (
 )
 
 
+from roll.utils.role_lora_training_reward import invalid_move_reward_enabled
+
+# The invalid-move floor changes what a matrix cell means, so it is part of the
+# version: cells cached under one scoring are never reused under the other.
 ZERO_SUM_REWARD_VERSION = (
     SHARED_GAME_REWARD_VERSION if shared_game_reward_enabled()
+    else "role-lora-psro-terminal-projection-v4+invalid-move-v1" if invalid_move_reward_enabled()
     else "role-lora-psro-terminal-projection-v4"
 )
 ZERO_SUM_REWARD_BOUNDS = shared_game_reward_bounds() if shared_game_reward_enabled() else (-1.0, 1.0)
@@ -112,10 +117,24 @@ def compute_zero_sum_psro_reward(
         attacker_normalized, labels
     )
     attacker_payoff = (attacker_normalized - defender_normalized) / 2.0
+    # Same rule as training (ATTACKER_INVALID_MOVE=1): an off-topic rewrite, or a
+    # harmful seed whose rewrite is no longer judged harmful (or has no label),
+    # is a flat attacker loss at the bottom of the payoff range, independent of
+    # the reply.  The worst valid outcome is -0.75, so every invalid move is
+    # strictly dominated.  Benign-to-harmful drift is dropped above, as before.
+    invalid_diag: dict[str, Any] = {}
+    if invalid_move_reward_enabled():
+        expected = "harmful" if prompt_type == "generated_harmful" else "unharmful"
+        invalid = labels.get("off_topic") is True or labels.get("prompt_harmfulness") != expected
+        invalid_diag = {"attacker_invalid_move": invalid,
+                        "attacker_zero_sum_reward_before_invalid_move": attacker_payoff}
+        if invalid:
+            attacker_payoff = ZERO_SUM_REWARD_BOUNDS[0]
     defender_payoff = -attacker_payoff
     return {
         "reward_version": ZERO_SUM_REWARD_VERSION,
         **offtopic_diag,
+        **invalid_diag,
         "attacker_zero_sum_reward": attacker_payoff,
         "defender_zero_sum_reward": defender_payoff,
         "attacker_terminal_general_sum_reward": attacker_terminal,
