@@ -75,8 +75,8 @@ docker stop -t 180 ssp-psro-s8888  # 需要停止时
 | 阶段结束 | W&B 显示 `crashed` | 早停正常现象；`training/<A_k>/early_stop.json` 里 `returncode=0` 即正常 | `returncode≠0` → 看 `training.log` 末尾 |
 | A1 结束后 | 进入矩阵计算，约 1 小时内开始 D1 | 出现新的 D1 W&B run | 卡在矩阵数小时无新 run → 看 `<workspace>/psro/role_lora_zero_sum_psro/<suffix>/logs/cells/*.log` |
 
-在我们的 2×H200 测试里（同一 reward，A1 vs D0），benign 数量 200 step 内保持稳定，attacker 成功率 0.33 → 0.8，
-非法动作 0.38 → 0.02。上一轮 `shared_binary` 在 80–160 step 内 benign 降到 0，导致矩阵卡住。
+在我们的 2×H200 测试里（同一 reward，A1 vs D0，截至约 80 step；完整 200 step 结果待补），benign 数量保持稳定，
+attacker 成功率 0.33 → 0.8，非法动作 0.38 → 0.02。上一轮 `shared_binary` 在 80–160 step 内 benign 降到 0，导致矩阵卡住。
 
 ## 6. Checkpoint 上传规则
 
