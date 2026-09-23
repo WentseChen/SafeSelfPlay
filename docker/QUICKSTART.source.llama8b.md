@@ -7,6 +7,8 @@
 2026-09-23 版同步最新主分支，包含运行全程的本地 judge 服务、矩阵评估分卡、旧奖励补丁检测及 Hugging Face checkpoint 上传修复。
 更新后需重新执行 `build`，才能让容器使用新版代码。
 
+**只跑 PSRO 两个 seed：直接按 [`docker/RUN_PSRO_INVALIDMOVE.md`](RUN_PSRO_INVALIDMOVE.md) 操作（使用预构建镜像，无需 build）。**
+
 **本版（分支 `wentse/v6d-invalid-move-reward`）默认 reward 改为 v6d + attacker 非法动作固定惩罚，见第 2 节。镜像标签随之改为 `…-invalidmove-20260923`；已构建过旧镜像也必须重新 `build`，否则仍会运行旧代码。**
 
 训练模型：`mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated`。按顺序执行：**联网构建 → 选择 label → 下载模型 → 三组训练**。
