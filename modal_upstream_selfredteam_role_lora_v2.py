@@ -349,6 +349,8 @@ def _patch_asymmetric_label_drift_training() -> None:
         "    ATTACKER_OBJECTIVE_INTENDED,\n"
         "    cap_label_drift_attacker_reward,\n"
         "    compute_attacker_reward_intended,\n"
+        "    invalid_move_attacker_reward,\n"
+        "    invalid_move_reward_enabled,\n"
         "    label_drift_training_action,\n"
         ")\n"
         "from roll.utils.shared_game_reward import (\n"
@@ -448,6 +450,21 @@ def _patch_asymmetric_label_drift_training() -> None:
                     turn_states['attacker_label_drift'] = scored["label_drift"]
                     reward = scored["reward"]
                 elif (
+                    turn_states["game_role"] == "attacker"
+                    and invalid_move_reward_enabled()
+                    and game["prompt_type"] in {"generated_harmful", "generated_benign"}
+                ):
+                    # Flat floor for drift / off-topic; replaces the zero cap.
+                    turn_states['reward_before_invalid_move'] = reward
+                    reward, turn_states['attacker_invalid_moves'] = invalid_move_attacker_reward(
+                        reward=reward,
+                        prompt_type=game["prompt_type"],
+                        labels=labels,
+                        cot_format_violation=turn_states.get("cot_format_violation"),
+                    )
+                    if "off_topic" in labels:
+                        turn_states["topic_off_topic"] = int(bool(labels["off_topic"]))
+                elif (
                     label_drift_action == "cap_zero"
                     and turn_states["game_role"] == "attacker"
                 ):
@@ -472,6 +489,7 @@ def _patch_asymmetric_label_drift_training() -> None:
             'prompt_origin', 'label_drift_action',
             'reward_before_label_drift_cap',
             'reward_upstream_objective', 'attacker_label_drift',
+            'reward_before_invalid_move', 'attacker_invalid_moves',
             'reward_before_topic_penalty', 'topic_off_topic',
             'topic_reward_component', 'topic_judge_model', 'topic_prompt_version',
 """,
@@ -1870,9 +1888,11 @@ def _patch_shared_game_reward_metrics() -> None:
         )
 """,
         """        from roll.utils.shared_game_reward import shared_game_reward_enabled
-        if shared_game_reward_enabled():
+        from roll.utils.role_lora_training_reward import invalid_move_reward_enabled
+        if shared_game_reward_enabled() or invalid_move_reward_enabled():
             # Every rank executes the same reductions, including empty ranks.
-            for field in ("topic_off_topic", "topic_reward_component", "reward_before_topic_penalty"):
+            for field in ("topic_off_topic", "topic_reward_component", "reward_before_topic_penalty",
+                          "attacker_invalid_moves", "reward_before_invalid_move"):
                 values = [scalar(item.info[field]) for item in train_items
                           if item.info.get(field) is not None]
                 count = strategy.all_reduce(float(len(values)), "sum")

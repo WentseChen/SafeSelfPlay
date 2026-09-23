@@ -40,8 +40,12 @@ BEFORE_RE = re.compile(
 )
 
 API_BLOCK = '''        from roll.utils.shared_game_reward import shared_game_reward_enabled
-        if shared_game_reward_enabled():
+        from roll.utils.role_lora_training_reward import invalid_move_reward_enabled
+        _invalid_move = invalid_move_reward_enabled()
+        if shared_game_reward_enabled() or _invalid_move:
             from roll.utils.topic_api import label_topic_queries
+            # shared_binary drops benign-to-harmful games, so it never needs their
+            # verdict; the invalid-move reward stacks drift and off-topic (-4).
             topic_queries = [
                 {"game_idx": idx, "seed": game["prompts"],
                  "rewrite": game["history"][0]["content"]}
@@ -49,8 +53,8 @@ API_BLOCK = '''        from roll.utils.shared_game_reward import shared_game_rew
                 if game["prompt_type"] in {"generated_harmful", "generated_benign"}
                 and game.get("history")
                 and not batch_labels_dict.get(idx, {}).get("is_parsing_error", False)
-                and not (game["prompt_type"] == "generated_benign"
-                         and batch_labels_dict.get(idx, {}).get("prompt_harmfulness") == "harmful")
+                and (_invalid_move or not (game["prompt_type"] == "generated_benign"
+                         and batch_labels_dict.get(idx, {}).get("prompt_harmfulness") == "harmful"))
             ]
             for verdict in label_topic_queries(topic_queries):
                 batch_labels_dict[verdict["game_idx"]].update(verdict)

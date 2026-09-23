@@ -355,12 +355,26 @@ TRAIN_CMD=("$PY" -m openrlhf.cli.train_ppo_ray
   --vllm_sync_backend nccl "${ENGINE_PERF[@]}" --flash_attn
   "${WANDB_ARGS[@]}")
 
+# ATTACKER_INVALID_MOVE=1 keeps the legacy (v6d) reward and floors invalid
+# attacker moves (label drift, off-topic) at -3/-4; see
+# roll/utils/role_lora_training_reward.py.  It needs the same topic judge as
+# shared_binary.  Exported before `ray start` so the workers see it.
+export ATTACKER_INVALID_MOVE=${ATTACKER_INVALID_MOVE:-0}
+if [ "$ATTACKER_INVALID_MOVE" = 1 ] && [ "${GAME_REWARD_MODE:-legacy}" != legacy ]; then
+  echo "$TAG ATTACKER_INVALID_MOVE=1 applies to GAME_REWARD_MODE=legacy only" >&2
+  exit 1
+fi
+NEEDS_TOPIC_JUDGE=0
+if [ "${GAME_REWARD_MODE:-legacy}" = shared_binary ] || [ "$ATTACKER_INVALID_MOVE" = 1 ]; then
+  NEEDS_TOPIC_JUDGE=1
+fi
+
 # Point TOPIC_API_* at the selected labeler.  This must run before the reward
 # contract check below: shared_game_reward_contract() resolves the topic judge
 # configuration, so leaving it until the service launch made the default local
 # backend fail with "Set TOPIC_API_MODEL and TOPIC_API_KEY" before any service
 # started.  Configuring here is safe -- resolving the config makes no request.
-if [ "${GAME_REWARD_MODE:-legacy}" = shared_binary ]; then
+if [ "$NEEDS_TOPIC_JUDGE" = 1 ]; then
   case "$TOPIC_JUDGE_BACKEND" in
     local)
       if [ "${TOPIC_JUDGE_MANAGED:-0}" = 1 ]; then
@@ -432,6 +446,17 @@ if [ "${GAME_REWARD_MODE:-legacy}" = shared_binary ]; then
   done
 fi
 
+if [ "$ATTACKER_INVALID_MOVE" = 1 ]; then
+  # Same failure mode as above: a stale work tree would silently train on v6d.
+  GAME_LOOP=$WORK/openrlhf/trainer/ppo_utils/language_game.py
+  for marker in invalid_move_attacker_reward invalid_move_reward_enabled; do
+    if ! grep -q "$marker" "$GAME_LOOP" 2>/dev/null; then
+      echo "$TAG ATTACKER_INVALID_MOVE=1 but $GAME_LOOP has no '$marker'; re-run prepare_sources.py and patch_offtopic_labels.py" >&2
+      exit 1
+    fi
+  done
+fi
+
 # --- judge --------------------------------------------------------------------
 # Each service owns a process group so failed vLLM children release their GPUs.
 # Keep one exit trap: installing the Ray cleanup must not forget the verifier.
@@ -495,7 +520,7 @@ echo "$TAG judge up after ~$((i * 10))s"
 # memorized prompt.  Optional: if it fails to come up we train without the term
 # rather than lose the run, and the episode rows record the verdict as absent.
 export OFFTOPIC_URL=""
-if [ "${GAME_REWARD_MODE:-legacy}" = shared_binary ]; then
+if [ "$NEEDS_TOPIC_JUDGE" = 1 ]; then
   # The label is required here -- shared_game_reward.py raises rather than
   # assume "on-topic" -- so unlike the legacy verifier this must come up or the
   # phase fails now, instead of dying thousands of GPU-seconds into step 1.
