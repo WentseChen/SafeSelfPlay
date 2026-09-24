@@ -123,8 +123,8 @@ attacker 成功率 0.33 → 0.96，非法动作 0.38 → 0.02；用 step 40 chec
 | 项目 | 值 |
 | --- | --- |
 | 镜像 | `ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260924-v4` |
-| digest | `DIGEST_PLACEHOLDER` |
-| 构建 commit（`check` 应显示） | `COMMIT_PLACEHOLDER` |
+| digest | `sha256:dcd49b1b149e592e4907268c6d2de0af3ea1e49167cfaae6ae8c720a29cef1cb` |
+| 构建 commit（`check` 应显示） | `b815827523d2cf3d68d7090623eff41ba3e9a6ac` |
 | 默认配置 | `GAME_REWARD_MODE=legacy`、`ATTACKER_INVALID_MOVE=1`、`RACE_CELLS=1`、`CELL_STREAMING=0`、4×H200 |
 
 **v4 相对 v3**：

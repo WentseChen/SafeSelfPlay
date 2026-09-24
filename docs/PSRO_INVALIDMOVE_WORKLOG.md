@@ -51,7 +51,7 @@ On top of the v6d legacy (Self-RedTeam v2) reward:
   The newest attacker/defender cells always get the full budget.
 - Images: v3 `…-invalidmove-20260923-v3` (commit 1aaa113); **v4
   `ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260924-v4`** for the full rerun
-  (PSRO s8888/s8889, uniform, naive; new suffixes `*_inv4_*`). Runbook: `docker/RUN_PSRO_INVALIDMOVE.md`.
+  (digest `sha256:dcd49b1b…`, commit b815827; PSRO s8888/s8889, uniform, naive; new suffixes `*_inv4_*`). Runbook: `docker/RUN_PSRO_INVALIDMOVE.md`.
 - v4 ships the streaming-cell code with `CELL_STREAMING=0`; switch on after the H200 timing.
 - GPU layout stays 4xH200 in the repo; 1-2 GPU test configs were only in local sbatch files.
 
