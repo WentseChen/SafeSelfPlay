@@ -228,3 +228,31 @@ def invalid_move_attacker_reward(
     if labels.get("response_refusal") is None or labels.get("response_harmfulness") is None:
         return min(float(reward), 0.0), 0
     return float(reward), 0
+
+
+# ---------------------------------------------------------------------------
+# Defender format floor (DEFENDER_FORMAT_FLOOR=1).
+#
+# The additive Self-RedTeam defender reward prices a broken <think>/<answer>
+# format at only -1 against +1, so a format-violating refusal (+1) beats a
+# formatted compliance (-1).  A defender that discovers refusal late learns the
+# broken-format refusal first, the format then collapses for every prompt, and
+# the policy degenerates with zero within-batch contrast (s8888 D1, 2026-09-24).
+# With the floor, any defender format violation scores a flat -3, the minimum of
+# the additive reward, so no violating reply ever outranks a formatted one.
+
+DEFENDER_FORMAT_FLOOR_POLICY = "defender-format-floor-v1"
+DEFENDER_FORMAT_FLOOR_REWARD = -3.0
+
+
+def defender_format_floor_enabled() -> bool:
+    value = os.environ.get("DEFENDER_FORMAT_FLOOR", "0")
+    if value not in {"0", "1"}:
+        raise ValueError("DEFENDER_FORMAT_FLOOR must be 0 or 1")
+    return value == "1"
+
+
+def defender_format_floor_reward(*, reward: float, cot_format_violation: bool | None) -> float:
+    """Return the defender reward with a flat floor for a broken format."""
+
+    return DEFENDER_FORMAT_FLOOR_REWARD if cot_format_violation else float(reward)

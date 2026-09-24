@@ -257,6 +257,10 @@ def record_run_settings(args, env: dict[str, str]) -> None:
         "base_model": BASE_MODEL, "judge_model": JUDGE_MODEL,
         "environment": {key: env.get(key, default) for key, default in defaults.items()},
     }
+    # Recorded only when enabled, so runs recorded before the flag existed keep
+    # resuming; a run started with it cannot be resumed without it.
+    if env.get("DEFENDER_FORMAT_FLOOR", "0") != "0":
+        recipe["environment"]["DEFENDER_FORMAT_FLOOR"] = env["DEFENDER_FORMAT_FLOOR"]
     from roll.utils.shared_game_reward import shared_game_reward_enabled, shared_game_reward_contract
     if shared_game_reward_enabled():
         recipe["shared_game_reward"] = shared_game_reward_contract()

@@ -349,6 +349,8 @@ def _patch_asymmetric_label_drift_training() -> None:
         "    ATTACKER_OBJECTIVE_INTENDED,\n"
         "    cap_label_drift_attacker_reward,\n"
         "    compute_attacker_reward_intended,\n"
+        "    defender_format_floor_enabled,\n"
+        "    defender_format_floor_reward,\n"
         "    invalid_move_attacker_reward,\n"
         "    invalid_move_reward_enabled,\n"
         "    label_drift_training_action,\n"
@@ -470,6 +472,17 @@ def _patch_asymmetric_label_drift_training() -> None:
                 ):
                     turn_states['reward_before_label_drift_cap'] = reward
                     reward = cap_label_drift_attacker_reward(reward)
+                if (
+                    turn_states["game_role"] == "defender"
+                    and defender_format_floor_enabled()
+                ):
+                    # Flat floor for a broken defender format; see
+                    # roll.utils.role_lora_training_reward.
+                    turn_states['reward_before_format_floor'] = reward
+                    reward = defender_format_floor_reward(
+                        reward=reward,
+                        cot_format_violation=turn_states.get("cot_format_violation"),
+                    )
                 turn_states['reward'] = reward
                 turn_states['game_outcomes'] = outcome
                 turn_states['label_drift_action'] = label_drift_action
