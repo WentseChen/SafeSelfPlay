@@ -1368,7 +1368,9 @@ def evaluate_upstream_v2_raw_payoff_cell(
                     ),
                     max_loras=2,
                     max_lora_rank=64,
-                    enforce_eager=True,
+                    # CUDA graphs speed up decoding, the cell's bottleneck;
+                    # opt-in (CELL_ENFORCE_EAGER=0) because it is not a contract field.
+                    enforce_eager=os.environ.get("CELL_ENFORCE_EAGER", "1") != "0",
                 )
                 attacker_request = (
                     LoRARequest("payoff_attacker", 1, compatible_attacker)
@@ -2434,7 +2436,9 @@ def evaluate_d1_paired_gate(
                     enable_lora=True,
                     max_loras=2,
                     max_lora_rank=64,
-                    enforce_eager=True,
+                    # CUDA graphs speed up decoding, the cell's bottleneck;
+                    # opt-in (CELL_ENFORCE_EAGER=0) because it is not a contract field.
+                    enforce_eager=os.environ.get("CELL_ENFORCE_EAGER", "1") != "0",
                 )
                 attacker_request = LoRARequest(
                     "paired_gate_attacker", 1, compatible_attacker

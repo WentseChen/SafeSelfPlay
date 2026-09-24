@@ -1178,10 +1178,18 @@ def main() -> int:
         # both arms was still improving at step 100, and 5 of 8 defenders peaked
         # before it, so the budget is raised and checkpoints are kept densely
         # enough to select on afterwards.
+        # Cell generation shape. generation_batch_size >= 2 * candidate_wave_pairs
+        # makes each wave ONE vLLM call per role, so continuous batching refills
+        # finished slots instead of every 64-prompt chunk waiting for its longest
+        # reply (a 2048-token defender straggler gated each chunk). Contract
+        # fields: chosen when the run starts, recorded, never changed mid-run.
         for key, env in (("steps_per_role", "STEPS_PER_ROLE"),
                          ("save_steps", "SAVE_STEPS_CONTRACT"),
                          ("training_seed", "TRAINING_SEED"),
-                         ("matrix_episodes", "MATRIX_EPISODES")):
+                         ("matrix_episodes", "MATRIX_EPISODES"),
+                         ("candidate_wave_pairs", "MATRIX_WAVE_PAIRS"),
+                         ("generation_batch_size", "MATRIX_GENERATION_BATCH"),
+                         ("judge_batch_size", "MATRIX_JUDGE_BATCH")):
             raw = os.environ.get(env)
             if raw:
                 advance_kwargs[key] = int(raw)
