@@ -72,6 +72,7 @@ ENV SSP_ROOT=/workspace \
     INIT_KL_COEF=0 \
     LADDER_EARLY_STOP=1 \
     RACE_CELLS=1 \
+    CELL_STREAMING=0 \
     WANDB_ENTITY=2373025856w-the-university-of-hong-kong \
     WANDB_PROJECT=self-play \
     WANDB_GROUP=upstream-selfredteam-role-lora-v2 \

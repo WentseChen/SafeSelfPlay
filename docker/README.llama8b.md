@@ -12,7 +12,7 @@
 其中先选择本地模型或 Opus API 做 label，再执行三个训练命令。
 
 `.build.tar.gz` 是源码构建包；`.image.tar.gz` 是可 `docker load` 导入的完整镜像。
-本次发布源码构建包，在目标服务器构建后的镜像标签为 `safeselfplay:llama8b-h200-invalidmove-20260923-v3`。
+本次发布源码构建包，在目标服务器构建后的镜像标签为 `safeselfplay:llama8b-h200-invalidmove-20260924-v4`。
 2026-09-23 版包含运行全程的本地 judge 服务、矩阵评估分卡、旧奖励补丁检测及 Hugging Face checkpoint 上传修复。
 源码构建版在老师的服务器安装依赖并执行检查，实际版本写入镜像内 `/opt/runtime-packages.txt`。
 构建脚本将 Git 提交写入 OCI `org.opencontainers.image.revision` 标签，便于核对重建结果。

@@ -499,8 +499,8 @@ class UpstreamV2RawRewardTest(unittest.TestCase):
 
 
 class InterleavedEpisodePlanTest(unittest.TestCase):
-    harmful = [{"vanilla": f"harmful-{index}"} for index in range(7)]
-    benign = [{"vanilla": f"benign-{index}"} for index in range(5)]
+    harmful = [{"vanilla": f"harmful-{index}"} for index in range(64)]
+    benign = [{"vanilla": f"benign-{index}"} for index in range(64)]
 
     def test_plan_is_explicitly_alternating_and_balanced(self):
         specs = build_interleaved_episode_specs(

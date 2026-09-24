@@ -1,10 +1,9 @@
-# PSRO 两个 seed 运行说明（invalid-move reward，4×H200）
+# 全部实验重跑说明（invalid-move reward，镜像 v4，4×H200）
 
-本次只跑 **PSRO**，两个 seed：`8888` 和 `8889`。
-代码：分支 `wentse/v6d-invalid-move-reward`。镜像 `-v2` 含训练 reward、矩阵非法动作 -1、racing 默认。镜像已预先构建，**不需要 build**。
+本次**全部重跑**：PSRO（seed 8888、8889）+ uniform + naive，全部用镜像 **v4**、**新的 `--run-suffix`**（旧 run 不续跑）。
+代码：分支 `wentse/v6d-invalid-move-reward`。镜像已预先构建，**不需要 build**。
 
-> 注意：上一轮的 psro-a / psro-b 两个 run 实际都是 seed 8888（W&B config 里 `seed=8888`），
-> 并不是两个 seed。本次用 `TRAINING_SEED` 显式区分。
+v4 = v3 的全部修正 + 阶段切换时的 GPU 释放加固（见文末「镜像信息」）。
 
 ## 0. 节点要求
 
@@ -12,7 +11,7 @@
 - 能访问 GitHub、ghcr.io、Hugging Face、W&B。
 - 工作目录（`SSP_DOCKER_WORKSPACE`）所在磁盘每个 seed 至少留 **150 GB**（模型约 35 GB；一个完整 8 代 run 约 65 GB checkpoint 与日志）。
 - GitHub 账号需能访问私有仓库 `xudongwu-0/SafeSelfPlay`；ghcr 镜像为私有时需被授权。
-- **每个 seed 占一个 4 卡节点**。两个 seed 并行就用两个节点；只有一个节点就先跑 seed 8888，结束后再跑 8889。
+- **每个 run 占一个 4 卡节点**（PSRO s8888、PSRO s8889、uniform、naive 共 4 个 run）。节点不够就排队依次跑，
   不要在同一节点同时跑两个 run（会争 GPU 和 Ray 端口）。
 
 ## 1. 代码与镜像（每个节点都做一次）
@@ -22,10 +21,10 @@ git clone -b wentse/v6d-invalid-move-reward https://github.com/xudongwu-0/SafeSe
 cd SafeSelfPlay
 
 docker login ghcr.io          # 镜像为私有时需要；token 需 read:packages
-docker pull ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260923-v3
-docker tag  ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260923-v3 \
-            safeselfplay:llama8b-h200-invalidmove-20260923-v3
-export SSP_IMAGE=safeselfplay:llama8b-h200-invalidmove-20260923-v3
+docker pull ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260924-v4
+docker tag  ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260924-v4 \
+            safeselfplay:llama8b-h200-invalidmove-20260924-v4
+export SSP_IMAGE=safeselfplay:llama8b-h200-invalidmove-20260924-v4
 ```
 
 ## 2. 环境变量
@@ -60,25 +59,37 @@ docker run --rm --entrypoint bash -e HF_TOKEN -e NODE="$(hostname)" "$SSP_IMAGE"
 
 报错（401/403）就换一个对该仓库有 write 权限的 token，再开始训练。
 
-## 4. 启动（每个节点一个 seed）
+## 4. 启动（每个节点一个 run）
+
+先 `nvidia-smi` 确认 4 张卡上没有残留进程（旧容器先 `docker stop -t 180 <name>`）。
 
 ```bash
-# 节点 1
-TRAINING_SEED=8888 RACE_CELLS=1 DETACH=1 CONTAINER_NAME=ssp-psro-s8888 \
-  bash docker/run_llama8b.sh psro --run-suffix "psro8_${RUN_LABELER}_inv1_s8888" --rounds 8 --steps-per-role 300
+# PSRO seed 8888
+TRAINING_SEED=8888 DETACH=1 CONTAINER_NAME=ssp-psro-s8888 \
+  bash docker/run_llama8b.sh psro --run-suffix "psro8_${RUN_LABELER}_inv4_s8888" --rounds 8 --steps-per-role 300
 
-# 节点 2
-TRAINING_SEED=8889 RACE_CELLS=1 DETACH=1 CONTAINER_NAME=ssp-psro-s8889 \
-  bash docker/run_llama8b.sh psro --run-suffix "psro8_${RUN_LABELER}_inv1_s8889" --rounds 8 --steps-per-role 300
+# PSRO seed 8889
+TRAINING_SEED=8889 DETACH=1 CONTAINER_NAME=ssp-psro-s8889 \
+  bash docker/run_llama8b.sh psro --run-suffix "psro8_${RUN_LABELER}_inv4_s8889" --rounds 8 --steps-per-role 300
 
-docker logs -f ssp-psro-s8888      # 看日志；第一行应为 `Starting psro: …; reward mode=legacy`
+# uniform（seed 8888）
+TRAINING_SEED=8888 DETACH=1 CONTAINER_NAME=ssp-uniform-s8888 \
+  bash docker/run_llama8b.sh uniform --run-suffix "uniform8_${RUN_LABELER}_inv4_s8888" --rounds 8 --steps-per-role 300
+
+# naive self-play（seed 8888）
+TRAINING_SEED=8888 DETACH=1 CONTAINER_NAME=ssp-naive-s8888 \
+  bash docker/run_llama8b.sh naive --run-suffix "naive6_${RUN_LABELER}_inv4_s8888" --rounds 6 --steps-per-role 100
+
+docker logs -f ssp-psro-s8888      # 第一行应为 `Starting psro: …; reward mode=legacy`
 docker stop -t 180 ssp-psro-s8888  # 需要停止时
 ```
 
-`RACE_CELLS=1`：收益矩阵用 racing 估计（与 Table 1 的 v6d 相同）：每格先跑 256 局 pilot，
-只有 Nash 相关的行 / 列补到 4000 局，矩阵总局数约为全量的 1/3。**必须从第一次启动就设置**，矩阵设置在 run 开始时写入，之后不能改。
-
-同一个 `--run-suffix` 重新执行同一条命令即可续跑；不要换 seed 或改参数后复用旧 suffix（会被拒绝）。
+- racing（`RACE_CELLS=1`）是镜像默认：每格先跑 256 局 pilot，只有 Nash 相关的行/列补到 4000 局。
+  新 attacker / 新 defender 那一行/列总是跑满 4000 局，一个格子在 4×H200 上约 1–2 小时。
+- 中断后用**同一条命令、同一个 `--run-suffix`** 续跑；不要改 seed 或参数后复用 suffix（会被拒绝）。
+- 失败会在容器内自动重试（最多 5 次，间隔 60 秒），从 `state.json` 续跑。
+- 流式收益格（`CELL_STREAMING=1`，多卡并行生成，更快）默认**关闭**，等我们在 H200 上测完再通知开启；
+  它不是矩阵设置，之后停容器、加 `CELL_STREAMING=1` 用同一 suffix 重启即可，已算好的格子不受影响。
 
 ## 5. 运行中要看的指标
 
@@ -100,8 +111,8 @@ attacker 成功率 0.33 → 0.96，非法动作 0.38 → 0.02；用 step 40 chec
    `adapter_model.*`；上一轮自动上传静默失败了。失败时手动上传：
    ```bash
    huggingface-cli upload xudongwu/SafeSelfPlay-checkpoints \
-     <run>/training/A1/ckpt/global_step200_hf psro8_local_inv1_s8888/A1 \
-     --commit-message "psro8_local_inv1_s8888 A1 step200"
+     <run>/training/A1/ckpt/global_step200_hf psro8_local_inv4_s8888/A1 \
+     --commit-message "psro8_local_inv4_s8888 A1 step200"
    ```
 2. 训练中每 50 step 把最新 checkpoint 上传到 `<suffix>/<A_k>/latest/`（覆盖）。
 3. 每算完一个收益格，上传 `<run>/state.json` 和 `<run>/matrices/`。
@@ -111,26 +122,17 @@ attacker 成功率 0.33 → 0.96，非法动作 0.38 → 0.02；用 step 40 chec
 
 | 项目 | 值 |
 | --- | --- |
-| 镜像 | `ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260923-v3` |
-| digest | `sha256:900f5aa17cfed9efd50e378f725140a49ebf885312950b527bb0769d4970d664` |
-| 构建 commit（`check` 应显示） | `1aaa11308b508d1fa237867b77453f1347867195` |
-| 默认配置 | `GAME_REWARD_MODE=legacy`、`ATTACKER_INVALID_MOVE=1`、`RACE_CELLS=1`、4×H200 |
-| 镜像内已验证 | 矩阵版本 `…-v4+invalid-move-v1`；偏题且有害的对局矩阵收益 -1.0；训练 game loop 含非法动作规则；W&B 上传失败不中断训练；cell judge 停止后确认 GPU 0 已释放；driver 失败自动续跑 |
+| 镜像 | `ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260924-v4` |
+| digest | `DIGEST_PLACEHOLDER` |
+| 构建 commit（`check` 应显示） | `COMMIT_PLACEHOLDER` |
+| 默认配置 | `GAME_REWARD_MODE=legacy`、`ATTACKER_INVALID_MOVE=1`、`RACE_CELLS=1`、`CELL_STREAMING=0`、4×H200 |
 
-**v3 相比 v2 的修正**：v2 在第一个收益格算完、切换到训练时，cell judge（GPU 0 上的 vLLM Ray actor）可能尚未释放显存，
-A1 的 GPU-0 引擎因此 "No available memory" 在 W&B 启动前退出，容器（`--rm`）连同日志一起消失——seed 8889 就是这样停在 A1 之前。
-v3 会强制清理 judge 进程并等待 GPU 0 真正空闲，且 driver 失败后自动从 `state.json` 续跑（最多 `DRIVER_MAX_ATTEMPTS=5` 次，间隔 60 秒）。
+**v4 相对 v3**：
+- 每个训练阶段结束后（包括早停），杀掉训练用 WildGuard judge 的 Ray 残留进程，并确认 4 张卡都已释放，再启动收益格；
+  每次进入训练前也确认 4 张卡都已释放（v3 只检查 GPU 0）。
+- 包含流式收益格代码（默认关闭）。
 
-**已在 v2 上运行的 run 切换到 v3**：停止容器后，用 v3 镜像、**同一个 `--run-suffix`、同一条命令**重新启动即可续跑，
-已完成的 cell 和角色不会重跑（代码 hash 只做记录，不阻止续跑；参数必须一致）：
+**v3 相对 v2**：收益格结束切换到训练时，cell judge 可能未释放 GPU 0，导致下一个训练阶段起不来（seed 8889 曾卡在 A1 前）；
+v3 强制清理并等待 GPU 0 空闲，driver 失败自动续跑。
 
-```bash
-docker pull ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260923-v3
-docker tag  ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260923-v3 safeselfplay:llama8b-h200-invalidmove-20260923-v3
-export SSP_IMAGE=safeselfplay:llama8b-h200-invalidmove-20260923-v3
-nvidia-smi   # 先确认 GPU 上没有残留进程
-TRAINING_SEED=8889 RACE_CELLS=1 DETACH=1 CONTAINER_NAME=ssp-psro-s8889 \
-  bash docker/run_llama8b.sh psro --run-suffix "<与原来完全相同的 suffix>" --rounds 8 --steps-per-role 300
-```
-
-旧标签 `…-invalidmove-20260923` 与 `…-v2` **不要再用于新启动**。
+旧标签 `…-invalidmove-20260923`、`-v2`、`-v3` **不要再用于新启动**。
