@@ -1155,6 +1155,21 @@ def main() -> int:
             log(f"run-scoped judge on GPU {cfg.gpus - 1}: cell workers "
                 f"{cfg.cell_workers} -> {cfg.gpus - 2}")
             cfg.cell_workers = max(cfg.gpus - 2, 1)
+        # Point the judge and every client at it, exactly as the container's
+        # entrypoint does for its managed judge: the service serves under
+        # TOPIC_API_MODEL, and payoff cells and role_phase.sh (which reuses a
+        # managed judge) read TOPIC_API_*. Local mode overrides any leftover
+        # hosted-API settings so nothing is sent to a cloud endpoint.
+        local_api = {
+            "TOPIC_API_PROVIDER": "openai_compatible",
+            "TOPIC_API_MODEL": "local-topic-judge",
+            "TOPIC_API_BASE_URL": f"http://127.0.0.1:{service_env['TOPIC_JUDGE_PORT']}/v1",
+            "TOPIC_API_KEY": "local",
+        }
+        service_env.update(local_api)
+        service_env.pop("TOPIC_API_KEY_FILE", None)
+        os.environ.update(local_api)
+        os.environ.pop("TOPIC_API_KEY_FILE", None)
         judge_context = local_topic_service(service_env, SLURM_DIR.parent.parent)
         log(f"run-scoped topic judge on :{service_env['TOPIC_JUDGE_PORT']} "
             f"(GPU {service_env.get('TOPIC_JUDGE_GPU', '3')})")
