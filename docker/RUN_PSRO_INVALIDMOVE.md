@@ -112,9 +112,25 @@ attacker 成功率 0.33 → 0.96，非法动作 0.38 → 0.02；用 step 40 chec
 | 项目 | 值 |
 | --- | --- |
 | 镜像 | `ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260923-v3` |
-| digest | `sha256:f6331a3846a22377bbdfda2ad3a43c46d45f2ee96bdae3c5b07090e16778cc22` |
-| 构建 commit（`check` 应显示） | `0356ca35ef3fc46d9b6030066db9f41b9e9dff47` |
+| digest | `sha256:900f5aa17cfed9efd50e378f725140a49ebf885312950b527bb0769d4970d664` |
+| 构建 commit（`check` 应显示） | `1aaa11308b508d1fa237867b77453f1347867195` |
 | 默认配置 | `GAME_REWARD_MODE=legacy`、`ATTACKER_INVALID_MOVE=1`、`RACE_CELLS=1`、4×H200 |
-| 镜像内已验证 | 矩阵版本 `…-v4+invalid-move-v1`；偏题且有害的对局矩阵收益 -1.0；训练 game loop 含非法动作规则；W&B 上传失败不会中断训练 |
+| 镜像内已验证 | 矩阵版本 `…-v4+invalid-move-v1`；偏题且有害的对局矩阵收益 -1.0；训练 game loop 含非法动作规则；W&B 上传失败不中断训练；cell judge 停止后确认 GPU 0 已释放；driver 失败自动续跑 |
 
-旧标签 `…-invalidmove-20260923`（无 `-v2`）不含矩阵修正，**不要使用**。
+**v3 相比 v2 的修正**：v2 在第一个收益格算完、切换到训练时，cell judge（GPU 0 上的 vLLM Ray actor）可能尚未释放显存，
+A1 的 GPU-0 引擎因此 "No available memory" 在 W&B 启动前退出，容器（`--rm`）连同日志一起消失——seed 8889 就是这样停在 A1 之前。
+v3 会强制清理 judge 进程并等待 GPU 0 真正空闲，且 driver 失败后自动从 `state.json` 续跑（最多 `DRIVER_MAX_ATTEMPTS=5` 次，间隔 60 秒）。
+
+**已在 v2 上运行的 run 切换到 v3**：停止容器后，用 v3 镜像、**同一个 `--run-suffix`、同一条命令**重新启动即可续跑，
+已完成的 cell 和角色不会重跑（代码 hash 只做记录，不阻止续跑；参数必须一致）：
+
+```bash
+docker pull ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260923-v3
+docker tag  ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260923-v3 safeselfplay:llama8b-h200-invalidmove-20260923-v3
+export SSP_IMAGE=safeselfplay:llama8b-h200-invalidmove-20260923-v3
+nvidia-smi   # 先确认 GPU 上没有残留进程
+TRAINING_SEED=8889 RACE_CELLS=1 DETACH=1 CONTAINER_NAME=ssp-psro-s8889 \
+  bash docker/run_llama8b.sh psro --run-suffix "<与原来完全相同的 suffix>" --rounds 8 --steps-per-role 300
+```
+
+旧标签 `…-invalidmove-20260923` 与 `…-v2` **不要再用于新启动**。
