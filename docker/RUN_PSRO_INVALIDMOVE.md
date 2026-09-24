@@ -246,7 +246,7 @@ A1×D1：−0.748 到 −0.744 vs −0.744）。
 | 什么时候 | 看什么 | 正常 | 异常 → 处理 |
 | --- | --- | --- | --- |
 | 每个 attacker 阶段 | W&B `attacker/debug/n_generated_benign` | 大致持平（不应持续下降） | 降到接近 0 → 通知我们 |
-| 每个 attacker 阶段 | `topic/attacker_invalid_moves` | 逐步降到接近 0 | 持续上升 → 通知我们 |
+| 每个 attacker 阶段 | `train/topic/attacker_invalid_moves` | 逐步降到接近 0 | 持续上升 → 通知我们 |
 | 阶段结束 | W&B 显示 `crashed` | 早停正常现象；`training/<A_k>/early_stop.json` 里 `returncode=0` 即正常 | `returncode≠0` → 看 `training.log` 末尾 |
 | 每个 defender 阶段 | W&B `defender/cot_format_violation` | 接近 0（< 0.05） | 连续 20 步 > 0.3 → 停掉并报告（格式塌缩，会被保护机制以 returncode=2 停掉） |
 | A1 结束后 | 进入矩阵计算，约 30 分钟内开始 D1 | 出现新的 D1 W&B run | 超过 1 小时无新 run → 看 `<workspace>/psro/role_lora_zero_sum_psro/<suffix>/logs/cells/*.log`，确认有 `stream:` 行（没有说明第 2 节的 `CELL_*` 没生效） |
