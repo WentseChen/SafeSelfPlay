@@ -98,16 +98,45 @@ docker stop -t 180 ssp-psro-s8888  # 需要停止时
 - 已经在跑、但启动时没设第 2 节三个 `CELL_*` 变量的 run：`docker stop -t 180 <name>`，在 shell 里 export 这三个变量，
   再用**同一条命令、同一个 suffix** 重启。它们不是合约字段，已算好的格子保留，续跑不会被拒绝。
 
-### 已有的 PSRO run（invalid-move reward，`*_inv1_*`）改用 v4 续跑
+### 已有的 PSRO run（invalid-move reward，`inv1`）改用 v4 续跑
 
-PSRO s8888 / s8889 的旧 run 与 v4 reward 完全相同，**不要从头跑**，用 v4 + **原来的 suffix** 续跑：
+PSRO s8888 / s8889 的旧 run 与 v4 的 reward、矩阵设置完全相同，**不要从头跑**，用 v4 + **原来的 run 目录和 suffix** 续跑：
 已完成的角色和收益格全部保留，只有中断的那个角色从 step 0 重训（`PSRO_MIDRUN_RESUME=0`）。
+我们已用 v4 的代码对 s8888 在 HF 上的 `state.json` 做过续跑模拟：合约通过、A1 的 checkpoint SHA 校验通过，下一步正是训练 D1。
 
-1. 选停机时机：**等当前角色的 final checkpoint 上传后**（进入收益格阶段）再停，否则该角色要重训。已经死掉的 run 直接重启。
-2. `docker stop -t 180 <旧容器名>`；`nvidia-smi` 确认 4 张卡空闲。
-3. 按第 1–2 节换成 v4 镜像并 export 三个 `CELL_*` 变量，再用**与原来完全相同的命令和 `--run-suffix`** 启动。
-   启动日志应显示 resume（不是 fresh run）；若报 `Training settings changed`，说明命令参数与原来不一致，停下来找我们。
-4. 重启前请把旧 run 的 `training/<中断的角色>/training.log` 最后 100 行发给我们，确认崩溃原因已在 v4 修复。
+**续跑的四个必须条件**（任何一个不满足都会变成从头跑或报错）：
+
+1. **同一个 run 目录**：checkpoint 在 FSx 上，`state.json` 里记录的是绝对路径，例如
+   `/shared/dedicated-fsx-data-repo-training-phx-gl-eks-us-west-2/home/zzhihan/selfplay/runs/inv1-45906ffc-s8888-g8/psro/role_lora_zero_sum_psro/...`。
+   新 pod / 容器必须把同一个 FSx 目录挂在**同一个路径**，`SSP_ROOT` 指向同一个 run 目录。
+2. **同一个 suffix**：`psro8_local_inv1-45906ffc-s8888-g8` / `psro8_local_inv1-45906ffc-s8889-g8`（与原来逐字相同）。
+3. **同样的训练参数**：`TRAINING_SEED`、`--rounds 8`、`--steps-per-role 300` 以及其他环境变量与原来一致（不一致会报 `Training settings changed`，不会训练）。
+4. **镜像换成 v4**，并加上三个加速变量（它们不属于训练参数，加上不会导致上面的报错）：
+   ```bash
+   export CELL_STREAMING=1 CELL_ENFORCE_EAGER=0 CELL_SHARE_JUDGE_GPUS=0
+   ```
+
+**启动前检查**（路径按你们的 run 目录替换）：
+
+```bash
+RUN=<SSP_ROOT>/psro/role_lora_zero_sum_psro/psro8_local_inv1-45906ffc-s8888-g8
+ls $RUN/state.json $RUN/training/A1/ckpt/global_step240_hf/adapter_model.bin   # 两个都必须存在
+```
+
+**启动后检查**（driver 日志前几行）：
+- **不能**出现 `no state at … initializing a fresh cold run`——出现就说明没找到旧 run，立刻停掉。
+- s8888 应出现 `next action: {'kind': 'oracle', 'role': 'defender', 'target': 'D1'}`。
+- 出现 `Missing adapter checkpoint` 说明挂载路径不对，停掉检查条件 1。
+
+**什么时候停旧容器**：已经死掉的 run（s8888）直接重启；还在跑的 run（s8889）**等当前角色的 final checkpoint 上传到 HF 之后**
+（进入收益格阶段）再 `docker stop -t 180`，否则当前角色要从 step 0 重训。
+
+**s8888 的 D1 要盯一下**：上次 D1 在 step 90 之后 defender 的 CoT 格式违规率升到 91%→100%，被塌缩保护（abort）主动停掉，
+这是训练不稳定，不是代码 bug。v4 会从 step 0 重训 D1（失败自动重试最多 5 次）。请看 W&B
+`defender/cot_format_violation`：**连续 20 步超过 0.3 就停掉并通知我们**，不要让它把 5 次重试都跑完。
+
+备份：s8888 的 A1 final checkpoint 与 `state.json` 在 HF（`xudongwu/SafeSelfPlay-checkpoints/psro8_local_inv1-45906ffc-s8888-g8/`），
+SHA 与 FSx 上的一致；FSx 上的 run 目录丢失时再找我们用它恢复。
 
 ### 收益格加速设置（为什么要设第 2 节那三个 `CELL_*`）
 
