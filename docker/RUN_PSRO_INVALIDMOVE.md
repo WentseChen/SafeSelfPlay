@@ -70,13 +70,10 @@ docker run --rm --entrypoint bash -e HF_TOKEN -e NODE="$(hostname)" "$SSP_IMAGE"
 先 `nvidia-smi` 确认 4 张卡上没有残留进程（旧容器先 `docker stop -t 180 <name>`）。
 
 ```bash
-# PSRO seed 8888
-TRAINING_SEED=8888 DETACH=1 CONTAINER_NAME=ssp-psro-s8888 \
-  bash docker/run_llama8b.sh psro --run-suffix "psro8_${RUN_LABELER}_inv4_s8888" --rounds 8 --steps-per-role 300
-
-# PSRO seed 8889
-TRAINING_SEED=8889 DETACH=1 CONTAINER_NAME=ssp-psro-s8889 \
-  bash docker/run_llama8b.sh psro --run-suffix "psro8_${RUN_LABELER}_inv4_s8889" --rounds 8 --steps-per-role 300
+# PSRO seed 8888 / 8889：已有 inv1 run，**不要用下面的新 suffix**，按本节末「已有的 PSRO run」用原 run 目录和原 suffix 续跑。
+# 只有在旧 run 目录已经丢失、必须从头开始时，才用新 suffix：
+#   TRAINING_SEED=8888 DETACH=1 CONTAINER_NAME=ssp-psro-s8888 \
+#     bash docker/run_llama8b.sh psro --run-suffix "psro8_${RUN_LABELER}_inv4_s8888" --rounds 8 --steps-per-role 300
 
 # uniform（seed 8888）
 TRAINING_SEED=8888 DETACH=1 CONTAINER_NAME=ssp-uniform-s8888 \
