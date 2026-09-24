@@ -14,6 +14,9 @@
 5. **不要在一个角色训练中途停 run**（除非本文件明确要求）：中途停会让该角色从 step 0 重训。要停就等该角色 final checkpoint 上传后。
 6. 每个 run 启动时都必须带上：`export CELL_STREAMING=1 CELL_ENFORCE_EAGER=0 CELL_SHARE_JUDGE_GPUS=0`。
 7. 不要上传基座权重、`wandb/`、`topic_labels.sqlite3` 或任何 key；不要把 token 写进文件或命令历史。
+8. **同一个 seed 同一时间只跑一个 run，不要 fork。** W&B run ID 由 suffix 和角色名决定：两个进程用同一个 suffix 训练同一个角色，
+   会写进**同一个 W&B run**，曲线混在一起无法区分（2026-09-24 s8889 的 streaming fork 就把 D2 的 W&B 记录从 step 100 起覆盖了）；
+   若共用同一个 run 目录还会互相覆盖 `state.json` 和 checkpoint。确实需要第二个分支时，必须用**新的 suffix 和新的 run 目录**。
 
 ### 要做的 4 个 run
 
