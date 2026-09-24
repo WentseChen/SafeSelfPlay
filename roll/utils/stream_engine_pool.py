@@ -12,6 +12,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import queue
+import sys
 import time
 from typing import Any
 
@@ -207,9 +208,17 @@ class EnginePool:
             # already see only this GPU.
             previous = os.environ.get("CUDA_VISIBLE_DEVICES")
             os.environ["CUDA_VISIBLE_DEVICES"] = gpu
+            # The engine's target lives in this module, so the child has no
+            # use for the parent's __main__; hide it so spawn does not re-run
+            # the caller's script (or fail on `python -` / `-c`).
+            main = sys.modules["__main__"]
+            hidden = {k: main.__dict__.pop(k) for k in ("__file__",) if k in main.__dict__}
+            spec, main.__spec__ = getattr(main, "__spec__", None), None
             try:
                 proc.start()
             finally:
+                main.__dict__.update(hidden)
+                main.__spec__ = spec
                 if previous is None:
                     os.environ.pop("CUDA_VISIBLE_DEVICES", None)
                 else:
