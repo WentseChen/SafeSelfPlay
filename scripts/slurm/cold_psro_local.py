@@ -1014,18 +1014,35 @@ def prefetch_cells(psro: Any, cfg: Config, state: dict[str, Any], judge: Judge) 
         return plan.get(f"{attacker}__{defender}", int(contract["matrix_episodes_per_cell"]))
     judge_url = judge.start()
     cfg.cell_log_dir.mkdir(parents=True, exist_ok=True)
-    log(f"prefetching {len(pending)} payoff cell(s) on GPUs 1-{cfg.cell_workers}")
+    log(f"prefetching {len(pending)} payoff cell(s) on GPUs 1-{cfg.cell_workers}"
+        + (f" (+ shared judge cards)" if os.environ.get("CELL_SHARE_JUDGE_GPUS", "1") == "1"
+           and os.environ.get("CELL_STREAMING", "1") != "0" else ""))
 
     queue = list(pending)
-    running: dict[int, tuple[str, str, subprocess.Popen[bytes], Any]] = {}
+    running: dict[str, tuple[str, str, subprocess.Popen[bytes], Any]] = {}
     failures: list[str] = []
-    free_gpus = list(range(1, cfg.cell_workers + 1))
+    worker_gpus = list(range(1, cfg.cell_workers + 1))
+    if os.environ.get("CELL_STREAMING", "1") != "0":
+        # A streaming cell runs one engine per GPU it is given, so never leave
+        # a card idle: split the worker cards over the cells that can run now,
+        # and hand out the judge cards too (the pool sizes each engine to what
+        # the judge left free, and skips a card with too little).
+        slots = max(1, min(len(pending), cfg.cell_workers))
+        free_gpus = [worker_gpus[i::slots] for i in range(slots)]
+        if os.environ.get("CELL_SHARE_JUDGE_GPUS", "1") == "1":
+            spare = [g for g in range(cfg.gpus) if g not in worker_gpus]
+            for index, gpu in enumerate(spare):
+                free_gpus[index % slots].append(gpu)
+    else:
+        free_gpus = [[gpu] for gpu in worker_gpus]
 
-    def launch(gpu: int, attacker: str, defender: str) -> None:
+    def launch(gpus: list[int], attacker: str, defender: str) -> None:
         attacker_record = state["population"][attacker]
         defender_record = state["population"][defender]
         environment = cfg.base_env()
-        environment["CUDA_VISIBLE_DEVICES"] = str(gpu)
+        gpu = ",".join(str(g) for g in gpus)
+        environment["CUDA_VISIBLE_DEVICES"] = gpu
+        environment["CELL_ENGINE_GPUS"] = gpu
         command = [
             cfg.python, str(CELL_WORKER),
             "--coordinator", cfg.coordinator,
@@ -1071,7 +1088,7 @@ def prefetch_cells(psro: Any, cfg: Config, state: dict[str, Any], judge: Judge) 
                 continue
             handle.close()
             del running[gpu]
-            free_gpus.append(gpu)
+            free_gpus.append([int(g) for g in gpu.split(",")])
             if process.returncode == 0:
                 log(f"  cell {attacker} vs {defender} done")
             else:

@@ -31,6 +31,7 @@ import modal
 from roll.utils.shared_game_reward import shared_game_reward_enabled, shared_game_reward_contract
 from roll.utils.role_lora_training_reward import invalid_move_reward_enabled
 from roll.utils.topic_api import label_topic_queries
+from roll.utils.vllm_tokenizer_compat import _patch_vllm_tokenizer_runtime_compat
 
 if os.path.isdir("/roll") and "/roll" not in sys.path:
     sys.path.insert(0, "/roll")
@@ -166,70 +167,6 @@ def _token_ids_sha256(token_ids: list[int]) -> str:
         separators=(",", ":"),
     ).encode()
     return hashlib.sha256(payload).hexdigest()
-
-
-def _patch_vllm_tokenizer_runtime_compat() -> list[str]:
-    """Add the property vLLM 0.10.2 expects to tokenizer backends.
-
-    Recent Transformers can return ``TokenizersBackend`` rather than the
-    historical ``PreTrainedTokenizerFast`` class.  The image-level patch is
-    retained for worker subprocesses; this explicit runtime patch also covers
-    the exact class loaded by this standalone evaluator before ``LLM(...)``
-    constructs vLLM's cached-tokenizer wrapper.
-    """
-
-    def all_special_tokens_extended(self):
-        tokens = []
-        try:
-            tokens.extend(list(self.added_tokens_decoder.values()))
-        except Exception:
-            pass
-        try:
-            for token in self.all_special_tokens:
-                if token not in tokens:
-                    tokens.append(token)
-        except Exception:
-            pass
-        return tokens
-
-    candidates = (
-        ("transformers", "PreTrainedTokenizerBase"),
-        ("transformers", "PreTrainedTokenizer"),
-        ("transformers", "PreTrainedTokenizerFast"),
-        ("transformers", "TokenizersBackend"),
-        ("transformers.tokenization_utils_base", "PreTrainedTokenizerBase"),
-        ("transformers.tokenization_utils", "PreTrainedTokenizer"),
-        ("transformers.tokenization_utils_fast", "PreTrainedTokenizerFast"),
-        ("transformers.tokenization_utils_tokenizers", "TokenizersBackend"),
-    )
-    patched: list[str] = []
-    for module_name, class_name in candidates:
-        try:
-            module = __import__(module_name, fromlist=[class_name])
-            tokenizer_class = getattr(module, class_name, None)
-            if tokenizer_class is None:
-                continue
-            if not hasattr(tokenizer_class, "all_special_tokens_extended"):
-                setattr(
-                    tokenizer_class,
-                    "all_special_tokens_extended",
-                    property(all_special_tokens_extended),
-                )
-            if not hasattr(tokenizer_class, "all_special_tokens_extended"):
-                raise RuntimeError(
-                    f"failed to patch {module_name}.{class_name}"
-                )
-            qualified = f"{module_name}.{class_name}"
-            if qualified not in patched:
-                patched.append(qualified)
-        except (ImportError, AttributeError):
-            continue
-    if not patched:
-        raise RuntimeError(
-            "No supported Transformers tokenizer class was available for "
-            "the vLLM 0.10.2 compatibility patch"
-        )
-    return patched
 
 
 def _write_jsonl_atomic(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -422,6 +359,34 @@ def _sampling_params_for_seeds(
     ]
 
 
+def _generation_row(
+    tokenizer,
+    prompt: str,
+    original_ids: list[int],
+    used_ids: list[int],
+    token_ids: list[int],
+    raw_text: str,
+    finish_reason: Any,
+    stop_reason: Any,
+) -> dict[str, Any]:
+    return {
+        # Upstream LanguageGame ignores candidate.text and decodes token_ids
+        # with skip_special_tokens=True before parsing, opponent generation,
+        # and WildGuard classification.
+        "text": decode_upstream_vllm_completion(tokenizer, token_ids),
+        "vllm_raw_text": raw_text,
+        "finish_reason": finish_reason,
+        "stop_reason": stop_reason,
+        "token_count": len(token_ids),
+        "output_token_ids_sha256": _token_ids_sha256(token_ids),
+        "rendered_prompt_char_count": len(prompt),
+        "rendered_prompt_token_count": len(original_ids),
+        "tokenized_prompt_token_count": len(used_ids),
+        "tokenized_prompt_ids_sha256": _token_ids_sha256(list(used_ids)),
+        "prompt_truncated": len(original_ids) > len(used_ids),
+    }
+
+
 def _generate(
     llm,
     tokenizer,
@@ -485,30 +450,17 @@ def _generate(
             if not output.outputs:
                 raise RuntimeError("vLLM returned an empty candidate list")
             candidate = output.outputs[0]
-            token_ids = list(getattr(candidate, "token_ids", None) or [])
-            decoded_text = decode_upstream_vllm_completion(
-                tokenizer,
-                token_ids,
-            )
             rows.append(
-                {
-                    # Upstream LanguageGame ignores candidate.text and decodes
-                    # token_ids with skip_special_tokens=True before parsing,
-                    # opponent generation, and WildGuard classification.
-                    "text": decoded_text,
-                    "vllm_raw_text": candidate.text,
-                    "finish_reason": getattr(candidate, "finish_reason", None),
-                    "stop_reason": getattr(candidate, "stop_reason", None),
-                    "token_count": len(token_ids),
-                    "output_token_ids_sha256": _token_ids_sha256(token_ids),
-                    "rendered_prompt_char_count": len(prompt),
-                    "rendered_prompt_token_count": len(original_ids),
-                    "tokenized_prompt_token_count": len(used_ids),
-                    "tokenized_prompt_ids_sha256": _token_ids_sha256(
-                        list(used_ids)
-                    ),
-                    "prompt_truncated": len(original_ids) > len(used_ids),
-                }
+                _generation_row(
+                    tokenizer,
+                    prompt,
+                    original_ids,
+                    used_ids,
+                    list(getattr(candidate, "token_ids", None) or []),
+                    candidate.text,
+                    getattr(candidate, "finish_reason", None),
+                    getattr(candidate, "stop_reason", None),
+                )
             )
         print(f"generation complete: {stop}/{len(prompts)}", flush=True)
     return rows
@@ -572,6 +524,196 @@ def _classify_wildguard(
             flush=True,
         )
     return labels
+
+
+def _tokenize_for_generation(tokenizer, prompt: str, prompt_max_tokens: int):
+    original_ids = tokenizer.encode(prompt, add_special_tokens=False)
+    used_ids = tokenizer(
+        [prompt],
+        add_special_tokens=False,
+        padding=False,
+        truncation=True,
+        max_length=prompt_max_tokens,
+    )["input_ids"][0]
+    return original_ids, list(used_ids)
+
+
+def _stream_wave(
+    pool,
+    tokenizer,
+    *,
+    specs: list[dict[str, Any]],
+    attacker_prompts: list[str],
+    cached_attacks: list[Any],
+    direct_base_defender: bool,
+    max_new_tokens: int,
+    remote_rm_url: str,
+    judge_batch_size: int,
+    want_topic: bool,
+    on_fresh_attack,
+) -> tuple[list, list, list, list, list]:
+    """Run one wave as a pipeline with no batch barriers.
+
+    Each episode advances on its own: its attack is submitted as soon as there
+    is room, its defence the moment the attack finishes, and its judging the
+    moment enough defences have finished to fill one judge request. The engine
+    pool keeps a constant number of sequences in flight on every GPU, so no
+    request waits for the slowest member of a batch. Results are placed by
+    position, so the rows (and every seed) are exactly those of the batched
+    path; only the wall-clock order differs.
+    """
+    from collections import deque
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+
+    count = len(specs)
+    attacker_outputs: list[Any] = [None] * count
+    parsed_attacks: list[Any] = [None] * count
+    defender_outputs: list[Any] = [None] * count
+    parsed_defenses: list[Any] = [None] * count
+    labels: list[Any] = [None] * count
+    tokenized: dict[str, tuple[str, list[int], list[int]]] = {}
+
+    attack_queue: deque[int] = deque()
+    defend_queue: deque[int] = deque()
+    for position in range(count):
+        hit = cached_attacks[position]
+        if hit is None:
+            attack_queue.append(position)
+        else:
+            parsed_attacks[position] = hit[0]
+            attacker_outputs[position] = hit[1]
+            defend_queue.append(position)
+
+    def submit(position: int, role: str) -> None:
+        if role == "attacker":
+            prompt = attacker_prompts[position]
+            seed = int(specs[position]["candidate_seed"])
+        else:
+            prompt = _render_defender_prompt(
+                tokenizer,
+                str(parsed_attacks[position]["answer"]),
+                direct_base_defender=direct_base_defender,
+            )
+            seed = int(specs[position]["candidate_seed"]) + 1_000_000_000
+        original_ids, used_ids = _tokenize_for_generation(
+            tokenizer, prompt, TRAIN_PROMPT_MAX_TOKENS
+        )
+        key = f"{role[0]}{position}"
+        tokenized[key] = (prompt, original_ids, used_ids)
+        pool.submit(
+            key,
+            role=role,
+            token_ids=used_ids,
+            seed=seed,
+            max_new_tokens=max_new_tokens,
+            prompt_max_tokens=TRAIN_PROMPT_MAX_TOKENS,
+        )
+
+    def judge(positions: list[int]) -> list[tuple[int, dict[str, Any]]]:
+        queries = [
+            {
+                "game_idx": int(specs[i]["candidate_index"]),
+                "prompt": str(parsed_attacks[i]["answer"]),
+                "response": str(parsed_defenses[i]["answer"]),
+            }
+            for i in positions
+        ]
+        batch_labels = _classify_wildguard(
+            remote_rm_url, queries, batch_size=judge_batch_size
+        )
+        if want_topic:
+            topic_queries = [
+                {
+                    "game_idx": int(specs[i]["candidate_index"]),
+                    "seed": specs[i]["seed_prompt"],
+                    "rewrite": parsed_attacks[i]["answer"],
+                }
+                for i, label in zip(positions, batch_labels, strict=True)
+                if not label.get("is_parsing_error", False)
+                and not (
+                    specs[i]["prompt_type"] == "generated_benign"
+                    and label.get("prompt_harmfulness") == "harmful"
+                )
+            ]
+            topic = {
+                v["game_idx"]: v for v in label_topic_queries(topic_queries)
+            } if topic_queries else {}
+            for i, label in zip(positions, batch_labels, strict=True):
+                label.update(topic.get(int(specs[i]["candidate_index"]), {}))
+        return list(zip(positions, batch_labels, strict=True))
+
+    judge_buffer: list[int] = []
+    futures: set[Any] = set()
+    labelled = 0
+    generated = 0
+    started = time.time()
+    last_report = started
+    with ThreadPoolExecutor(
+        max_workers=int(os.environ.get("CELL_JUDGE_THREADS", "4"))
+    ) as executor:
+        while labelled < count:
+            while pool.in_flight < pool.capacity() and (defend_queue or attack_queue):
+                # Defences first: they finish episodes and feed the judges.
+                if defend_queue:
+                    submit(defend_queue.popleft(), "defender")
+                else:
+                    submit(attack_queue.popleft(), "attacker")
+            generating = pool.in_flight > 0
+            for key, token_ids, raw_text, finish, stop in (
+                pool.poll(timeout=0.5) if generating else []
+            ):
+                prompt, original_ids, used_ids = tokenized.pop(key)
+                row = _generation_row(
+                    tokenizer, prompt, original_ids, used_ids,
+                    token_ids, raw_text, finish, stop,
+                )
+                position = int(key[1:])
+                generated += 1
+                if key[0] == "a":
+                    attacker_outputs[position] = row
+                    parsed_attacks[position] = parse_prefilled_cot_completion(row["text"])
+                    on_fresh_attack(position, parsed_attacks[position], row)
+                    defend_queue.append(position)
+                else:
+                    defender_outputs[position] = row
+                    parsed_defenses[position] = (
+                        {
+                            "thinking": None,
+                            "answer": row["text"].strip(),
+                            "cot_format_violation": None,
+                        }
+                        if direct_base_defender
+                        else parse_prefilled_cot_completion(row["text"])
+                    )
+                    judge_buffer.append(position)
+            drained = not (pool.in_flight or defend_queue or attack_queue)
+            while judge_buffer and (len(judge_buffer) >= judge_batch_size or drained):
+                futures.add(executor.submit(judge, judge_buffer[:judge_batch_size]))
+                del judge_buffer[:judge_batch_size]
+            if futures:
+                done, futures = wait(
+                    futures, timeout=0 if generating else 0.5,
+                    return_when=FIRST_COMPLETED,
+                )
+                for future in done:
+                    for position, label in future.result():
+                        labels[position] = label
+                        labelled += 1
+            if time.time() - last_report > 60:
+                elapsed = time.time() - started
+                print(
+                    f"stream: {generated} generations, {labelled}/{count} episodes "
+                    f"judged, {pool.in_flight} in flight on {pool.size} engine(s), "
+                    f"{elapsed:.0f}s",
+                    flush=True,
+                )
+                last_report = time.time()
+    print(
+        f"stream wave: {count} episodes in {time.time() - started:.0f}s "
+        f"on {pool.size} engine(s)",
+        flush=True,
+    )
+    return attacker_outputs, parsed_attacks, defender_outputs, parsed_defenses, labels
 
 
 def _mean_metric(
@@ -1243,6 +1385,11 @@ def evaluate_upstream_v2_raw_payoff_cell(
                 f"{attack_cache.stats()['entries']} entries at {attack_cache.path}",
                 flush=True,
             )
+        # Streaming: one continuously batched engine per GPU and a per-episode
+        # pipeline instead of lockstep 64-prompt batches. CELL_STREAMING=0
+        # restores the batched path. Neither changes a seed or a row.
+        stream_cells = os.environ.get("CELL_STREAMING", "1") != "0"
+        engine_pool = None
         direct_base_defender = raw_defender_path is None
         wave = 0
         # How deep each stratum has been drawn, so a resumed cell continues its
@@ -1311,10 +1458,39 @@ def evaluate_upstream_v2_raw_payoff_cell(
             else:
                 required_pairs = max(progress["deficits"].values())
                 remaining_pairs = (max_candidates - len(candidate_rows)) // 2
+                wave_pairs = candidate_wave_pairs
+                if stream_cells:
+                    # The interleaved candidate list is fixed by index, so the
+                    # wave size only sets how often the pipeline drains; the
+                    # retained prefix is identical. Size the wave to the
+                    # expected need (deficit / observed retention) so a cell is
+                    # one or two waves rather than dozens.
+                    valid_counts = progress.get("valid_counts") or {}
+                    needed = [0.0]
+                    for stratum, deficit in progress["deficits"].items():
+                        if int(deficit) <= 0:
+                            continue
+                        short = stratum.replace("generated_", "")
+                        judged = sum(
+                            row.get("prompt_type") in (stratum, f"generated_{short}")
+                            for row in candidate_rows
+                        )
+                        valid = int(
+                            valid_counts.get(
+                                f"generated_{short}", valid_counts.get(short, 0)
+                            )
+                        )
+                        retention = valid / judged if judged else 1.0
+                        needed.append(int(deficit) / max(retention, 0.05))
+                    required_pairs = int(max(needed) * 1.02) + 1
+                    wave_pairs = max(
+                        candidate_wave_pairs,
+                        int(os.environ.get("CELL_STREAM_WAVE_PAIRS", "1024")),
+                    )
                 candidate_pairs = min(
                     required_pairs,
                     remaining_pairs,
-                    candidate_wave_pairs,
+                    wave_pairs,
                 )
                 plan = None
                 if candidate_pairs <= 0:
@@ -1355,23 +1531,65 @@ def evaluate_upstream_v2_raw_payoff_cell(
                     if raw_defender_path
                     else None
                 )
-                llm = LLM(
-                    model=LLAMA_ABLITERATED_MODEL,
-                    tokenizer=LLAMA_ABLITERATED_MODEL,
-                    trust_remote_code=True,
-                    dtype="bfloat16",
-                    tensor_parallel_size=1,
-                    gpu_memory_utilization=0.90,
-                    max_model_len=TRAIN_MAX_MODEL_LEN,
-                    enable_lora=bool(
-                        compatible_attacker or compatible_defender
-                    ),
-                    max_loras=2,
-                    max_lora_rank=64,
-                    # CUDA graphs speed up decoding, the cell's bottleneck;
-                    # opt-in (CELL_ENFORCE_EAGER=0) because it is not a contract field.
-                    enforce_eager=os.environ.get("CELL_ENFORCE_EAGER", "1") != "0",
-                )
+                if stream_cells:
+                    from roll.utils.stream_engine_pool import EnginePool
+
+                    engine_gpus = [
+                        g for g in (
+                            os.environ.get("CELL_ENGINE_GPUS")
+                            or os.environ.get("CUDA_VISIBLE_DEVICES")
+                            or "0"
+                        ).split(",") if g.strip()
+                    ]
+                    util_by_gpu = {
+                        gpu: float(util)
+                        for gpu, _, util in (
+                            item.partition(":")
+                            for item in os.environ.get("CELL_ENGINE_UTILS", "").split(",")
+                            if item.strip()
+                        )
+                    }
+                    try:
+                        engine_pool = EnginePool(
+                            engine_gpus,
+                            model=LLAMA_ABLITERATED_MODEL,
+                            loras={
+                                "attacker": compatible_attacker,
+                                "defender": compatible_defender,
+                            },
+                            max_model_len=TRAIN_MAX_MODEL_LEN,
+                            max_num_seqs=int(os.environ.get("CELL_MAX_NUM_SEQS", "256")),
+                            enforce_eager=os.environ.get("CELL_ENFORCE_EAGER", "0") != "0",
+                            util_by_gpu=util_by_gpu,
+                            prepare="roll.utils.vllm_tokenizer_compat:_patch_vllm_tokenizer_runtime_compat",
+                        )
+                    except Exception as exc:
+                        # Never lose a cell to the fast path: fall back to the
+                        # batched engine on the first visible card.
+                        print(f"engine pool failed ({type(exc).__name__}: {exc}); "
+                              "falling back to batched generation", flush=True)
+                        engine_pool = None
+                        stream_cells = False
+                        os.environ["CUDA_VISIBLE_DEVICES"] = engine_gpus[0]
+                    llm = engine_pool
+                if engine_pool is None:
+                    llm = LLM(
+                        model=LLAMA_ABLITERATED_MODEL,
+                        tokenizer=LLAMA_ABLITERATED_MODEL,
+                        trust_remote_code=True,
+                        dtype="bfloat16",
+                        tensor_parallel_size=1,
+                        gpu_memory_utilization=0.90,
+                        max_model_len=TRAIN_MAX_MODEL_LEN,
+                        enable_lora=bool(
+                            compatible_attacker or compatible_defender
+                        ),
+                        max_loras=2,
+                        max_lora_rank=64,
+                        # CUDA graphs speed up decoding, the cell's bottleneck;
+                        # opt-in (CELL_ENFORCE_EAGER=0) because it is not a contract field.
+                        enforce_eager=os.environ.get("CELL_ENFORCE_EAGER", "1") != "0",
+                    )
                 attacker_request = (
                     LoRARequest("payoff_attacker", 1, compatible_attacker)
                     if compatible_attacker
@@ -1454,141 +1672,215 @@ def evaluate_upstream_v2_raw_payoff_cell(
                         int(spec["candidate_seed"]),
                         spec["seed_prompt"],
                     )
-            todo = [i for i, hit in enumerate(cached_attacks) if hit is None]
-            attacker_outputs = [None] * len(specs)
-            if todo:
-                fresh = _generate(
+            if engine_pool is not None:
+                status_path.write_text(
+                    json.dumps(
+                        {
+                            "completed": False,
+                            "stage": "streaming",
+                            "wave": wave,
+                            "durable_candidates": len(candidate_rows),
+                            "candidate_batch": len(specs),
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                output_vol.commit()
+
+                def on_fresh_attack(position, parsed, output):
+                    if attack_cache is not None:
+                        spec = specs[position]
+                        attack_cache.put(
+                            spec["source_index"],
+                            spec["prompt_type"],
+                            int(spec["candidate_seed"]),
+                            spec["seed_prompt"],
+                            parsed,
+                            output,
+                        )
+
+                try:
+                    streamed = _stream_wave(
+                        engine_pool,
+                        tokenizer,
+                        specs=specs,
+                        attacker_prompts=attacker_prompts,
+                        cached_attacks=cached_attacks,
+                        direct_base_defender=direct_base_defender,
+                        max_new_tokens=max_new_tokens,
+                        remote_rm_url=remote_rm_url,
+                        judge_batch_size=judge_batch_size,
+                        want_topic=(
+                            shared_game_reward_enabled() or invalid_move_reward_enabled()
+                        ),
+                        on_fresh_attack=on_fresh_attack,
+                    )
+                except Exception as exc:
+                    print(f"streaming wave failed ({type(exc).__name__}: {exc}); "
+                          "redoing it with batched generation", flush=True)
+                    engine_pool.kill()
+                    engine_pool = None
+                    stream_cells = False
+                    llm = None
+                    os.environ["CUDA_VISIBLE_DEVICES"] = (
+                        os.environ.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0]
+                    )
+                    if adaptive_stratum_sampling:
+                        stratum_cursor["harmful"] -= plan["harmful"]
+                        stratum_cursor["benign"] -= plan["benign"]
+                    continue
+                (
+                    attacker_outputs,
+                    parsed_attacks,
+                    defender_outputs,
+                    parsed_defenses,
+                    labels,
+                ) = streamed
+                defender_prompts = [
+                    _render_defender_prompt(
+                        tokenizer,
+                        str(parsed["answer"]),
+                        direct_base_defender=direct_base_defender,
+                    )
+                    for parsed in parsed_attacks
+                ]
+            else:
+                todo = [i for i, hit in enumerate(cached_attacks) if hit is None]
+                attacker_outputs = [None] * len(specs)
+                if todo:
+                    fresh = _generate(
+                        llm,
+                        tokenizer,
+                        [attacker_prompts[i] for i in todo],
+                        [int(specs[i]["candidate_seed"]) for i in todo],
+                        lora_request=attacker_request,
+                        batch_size=generation_batch_size,
+                        max_new_tokens=max_new_tokens,
+                        prompt_max_tokens=TRAIN_PROMPT_MAX_TOKENS,
+                    )
+                    for position, item in zip(todo, fresh):
+                        attacker_outputs[position] = item
+                parsed_attacks = []
+                for position, spec in enumerate(specs):
+                    hit = cached_attacks[position]
+                    if hit is not None:
+                        parsed_attacks.append(hit[0])
+                        attacker_outputs[position] = hit[1]
+                        continue
+                    parsed = parse_prefilled_cot_completion(
+                        attacker_outputs[position]["text"]
+                    )
+                    parsed_attacks.append(parsed)
+                    if attack_cache is not None:
+                        attack_cache.put(
+                            spec["source_index"],
+                            spec["prompt_type"],
+                            int(spec["candidate_seed"]),
+                            spec["seed_prompt"],
+                            parsed,
+                            attacker_outputs[position],
+                        )
+                if attack_cache is not None and todo:
+                    print(
+                        f"attack cache: {len(specs) - len(todo)} hit / {len(todo)} generated "
+                        f"({attack_cache.stats()['hit_rate']:.1%} lifetime hit rate)",
+                        flush=True,
+                    )
+
+                status_path.write_text(
+                    json.dumps(
+                        {
+                            "completed": False,
+                            "stage": "defender_generation",
+                            "wave": wave,
+                            "durable_candidates": len(candidate_rows),
+                            "candidate_batch": len(specs),
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+                output_vol.commit()
+                defender_prompts = [
+                    _render_defender_prompt(
+                        tokenizer,
+                        str(parsed["answer"]),
+                        direct_base_defender=direct_base_defender,
+                    )
+                    for parsed in parsed_attacks
+                ]
+                defender_outputs = _generate(
                     llm,
                     tokenizer,
-                    [attacker_prompts[i] for i in todo],
-                    [int(specs[i]["candidate_seed"]) for i in todo],
-                    lora_request=attacker_request,
+                    defender_prompts,
+                    [
+                        int(spec["candidate_seed"]) + 1_000_000_000
+                        for spec in specs
+                    ],
+                    lora_request=defender_request,
                     batch_size=generation_batch_size,
                     max_new_tokens=max_new_tokens,
                     prompt_max_tokens=TRAIN_PROMPT_MAX_TOKENS,
                 )
-                for position, item in zip(todo, fresh):
-                    attacker_outputs[position] = item
-            parsed_attacks = []
-            for position, spec in enumerate(specs):
-                hit = cached_attacks[position]
-                if hit is not None:
-                    parsed_attacks.append(hit[0])
-                    attacker_outputs[position] = hit[1]
-                    continue
-                parsed = parse_prefilled_cot_completion(
-                    attacker_outputs[position]["text"]
-                )
-                parsed_attacks.append(parsed)
-                if attack_cache is not None:
-                    attack_cache.put(
-                        spec["source_index"],
-                        spec["prompt_type"],
-                        int(spec["candidate_seed"]),
-                        spec["seed_prompt"],
-                        parsed,
-                        attacker_outputs[position],
-                    )
-            if attack_cache is not None and todo:
-                print(
-                    f"attack cache: {len(specs) - len(todo)} hit / {len(todo)} generated "
-                    f"({attack_cache.stats()['hit_rate']:.1%} lifetime hit rate)",
-                    flush=True,
+                parsed_defenses = (
+                    [
+                        parse_prefilled_cot_completion(item["text"])
+                        for item in defender_outputs
+                    ]
+                    if not direct_base_defender
+                    else [
+                        {
+                            "thinking": None,
+                            "answer": item["text"].strip(),
+                            "cot_format_violation": None,
+                        }
+                        for item in defender_outputs
+                    ]
                 )
 
-            status_path.write_text(
-                json.dumps(
-                    {
-                        "completed": False,
-                        "stage": "defender_generation",
-                        "wave": wave,
-                        "durable_candidates": len(candidate_rows),
-                        "candidate_batch": len(specs),
-                    },
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
-            output_vol.commit()
-            defender_prompts = [
-                _render_defender_prompt(
-                    tokenizer,
-                    str(parsed["answer"]),
-                    direct_base_defender=direct_base_defender,
+                status_path.write_text(
+                    json.dumps(
+                        {
+                            "completed": False,
+                            "stage": "wildguard",
+                            "wave": wave,
+                            "durable_candidates": len(candidate_rows),
+                            "candidate_batch": len(specs),
+                        },
+                        indent=2,
+                    ),
+                    encoding="utf-8",
                 )
-                for parsed in parsed_attacks
-            ]
-            defender_outputs = _generate(
-                llm,
-                tokenizer,
-                defender_prompts,
-                [
-                    int(spec["candidate_seed"]) + 1_000_000_000
-                    for spec in specs
-                ],
-                lora_request=defender_request,
-                batch_size=generation_batch_size,
-                max_new_tokens=max_new_tokens,
-                prompt_max_tokens=TRAIN_PROMPT_MAX_TOKENS,
-            )
-            parsed_defenses = (
-                [
-                    parse_prefilled_cot_completion(item["text"])
-                    for item in defender_outputs
-                ]
-                if not direct_base_defender
-                else [
+                output_vol.commit()
+                queries = [
                     {
-                        "thinking": None,
-                        "answer": item["text"].strip(),
-                        "cot_format_violation": None,
+                        "game_idx": int(spec["candidate_index"]),
+                        "prompt": str(attack["answer"]),
+                        "response": str(defense["answer"]),
                     }
-                    for item in defender_outputs
+                    for spec, attack, defense in zip(
+                        specs, parsed_attacks, parsed_defenses, strict=True
+                    )
                 ]
-            )
-
-            status_path.write_text(
-                json.dumps(
-                    {
-                        "completed": False,
-                        "stage": "wildguard",
-                        "wave": wave,
-                        "durable_candidates": len(candidate_rows),
-                        "candidate_batch": len(specs),
-                    },
-                    indent=2,
-                ),
-                encoding="utf-8",
-            )
-            output_vol.commit()
-            queries = [
-                {
-                    "game_idx": int(spec["candidate_index"]),
-                    "prompt": str(attack["answer"]),
-                    "response": str(defense["answer"]),
-                }
-                for spec, attack, defense in zip(
-                    specs, parsed_attacks, parsed_defenses, strict=True
+                labels = _classify_wildguard(
+                    remote_rm_url,
+                    queries,
+                    batch_size=judge_batch_size,
                 )
-            ]
-            labels = _classify_wildguard(
-                remote_rm_url,
-                queries,
-                batch_size=judge_batch_size,
-            )
 
-            if shared_game_reward_enabled() or invalid_move_reward_enabled():
-                topic_queries = [
-                    {"game_idx": int(spec["candidate_index"]),
-                     "seed": spec["seed_prompt"], "rewrite": attack["answer"]}
-                    for spec, attack, label in zip(specs, parsed_attacks, labels, strict=True)
-                    if not label.get("is_parsing_error", False)
-                    and not (spec["prompt_type"] == "generated_benign"
-                             and label.get("prompt_harmfulness") == "harmful")
-                ]
-                topic_labels = {v["game_idx"]: v for v in label_topic_queries(topic_queries)}
-                for spec, label in zip(specs, labels, strict=True):
-                    label.update(topic_labels.get(int(spec["candidate_index"]), {}))
+                if shared_game_reward_enabled() or invalid_move_reward_enabled():
+                    topic_queries = [
+                        {"game_idx": int(spec["candidate_index"]),
+                         "seed": spec["seed_prompt"], "rewrite": attack["answer"]}
+                        for spec, attack, label in zip(specs, parsed_attacks, labels, strict=True)
+                        if not label.get("is_parsing_error", False)
+                        and not (spec["prompt_type"] == "generated_benign"
+                                 and label.get("prompt_harmfulness") == "harmful")
+                    ]
+                    topic_labels = {v["game_idx"]: v for v in label_topic_queries(topic_queries)}
+                    for spec, label in zip(specs, labels, strict=True):
+                        label.update(topic_labels.get(int(spec["candidate_index"]), {}))
 
             wave_rows: list[dict[str, Any]] = []
             for (
@@ -1716,6 +2008,10 @@ def evaluate_upstream_v2_raw_payoff_cell(
                 encoding="utf-8",
             )
             output_vol.commit()
+
+        if engine_pool is not None:
+            engine_pool.close()
+            engine_pool = None
 
         episode_rows = progress["episodes"]
 
