@@ -72,7 +72,11 @@ class TopicAPIConfig:
             api_key=key,
             timeout=float(os.environ.get("TOPIC_API_TIMEOUT", "30")),
             attempts=int(os.environ.get("TOPIC_API_ATTEMPTS", "2")),
-            concurrency=int(os.environ.get("TOPIC_API_CONCURRENCY", "4")),
+            # A hosted API gets 4 parallel requests; the local judge batches
+            # whatever arrives together, so feed it a full batch.
+            concurrency=int(os.environ.get(
+                "TOPIC_API_CONCURRENCY",
+                "32" if base.startswith(("http://127.0.0.1", "http://localhost")) else "4")),
             batch_timeout=float(os.environ.get("TOPIC_API_BATCH_TIMEOUT", "300")),
             cache_path=os.environ.get("TOPIC_API_CACHE", str(Path(os.environ.get("SSP_ROOT", "/workspace")) / "topic_labels.sqlite3")),
         )

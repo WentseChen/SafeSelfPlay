@@ -97,12 +97,60 @@ def main() -> int:
         dtype="bfloat16",
         gpu_memory_utilization=float(os.environ.get("TOPIC_JUDGE_UTIL", "0.60")),
         max_model_len=int(os.environ.get("TOPIC_JUDGE_MAX_LEN", "8192")),
-        max_num_seqs=8,
+        max_num_seqs=int(os.environ.get("TOPIC_JUDGE_MAX_SEQS", "8")),
         enforce_eager=True,
         seed=42,
     )
     # Greedy: a sampled verdict would inject noise straight into the reward.
     params = SamplingParams(temperature=0.0, top_p=1.0, max_tokens=24)
+
+    # Micro-batching: the endpoint is async, so a direct llm.generate() call would
+    # block the event loop and serve strictly one request at a time (~60 ms each,
+    # on the critical path of every training step and every payoff-cell wave).
+    # Requests are queued and a single worker thread generates whatever has
+    # arrived within TOPIC_JUDGE_BATCH_WAIT_MS as one batch. Greedy decoding;
+    # batching can only move a verdict through bf16 rounding.
+    import asyncio
+    import queue
+    import threading
+
+    max_batch = int(os.environ.get("TOPIC_JUDGE_MAX_BATCH", "64"))
+    batch_wait = float(os.environ.get("TOPIC_JUDGE_BATCH_WAIT_MS", "5")) / 1000.0
+    pending: "queue.Queue" = queue.Queue()
+
+    def _settle(loop, future, method, value):
+        def apply():
+            if not future.done():
+                getattr(future, method)(value)
+        loop.call_soon_threadsafe(apply)
+
+    def batch_worker():
+        while True:
+            items = [pending.get()]
+            deadline = time.monotonic() + batch_wait
+            while len(items) < max_batch:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    items.append(pending.get(timeout=remaining))
+                except queue.Empty:
+                    break
+            try:
+                outputs = llm.generate([item[0] for item in items], params, use_tqdm=False)
+                for (_, loop, future), output in zip(items, outputs):
+                    _settle(loop, future, "set_result", output.outputs[0].text)
+            except Exception as exc:  # fail the batch, keep serving
+                for _, loop, future in items:
+                    _settle(loop, future, "set_exception", exc)
+
+    threading.Thread(target=batch_worker, name="topic-batcher", daemon=True).start()
+
+    async def generate_one(prompt: str) -> str:
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        pending.put((prompt, loop, future))
+        return await future
 
     app = FastAPI()
     stats = {"served": 0, "off_topic": 0, "unreadable": 0}
@@ -145,7 +193,7 @@ def main() -> int:
             tokenize=False,
             add_generation_prompt=True,
         )
-        raw = llm.generate([prompt], params)[0].outputs[0].text
+        raw = await generate_one(prompt)
         verdict = read_verdict(raw)
         stats["served"] += 1
         if verdict is None:
