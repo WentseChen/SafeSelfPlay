@@ -1,10 +1,82 @@
-# 全部实验重跑说明（invalid-move reward，镜像 v4，4×H200）
+# 全部实验运行说明（invalid-move reward，镜像 v4，4×H200）
 
-PSRO（seed 8888、8889）：已有的 `inv1` run 用 v4 **原 suffix 续跑**（见第 4 节末「已有的 PSRO run」）。
-uniform + naive：旧 run 用的是 `shared_binary` reward，与新 PSRO 不可比，用 v4 + **新 suffix** 从头跑。
-代码：分支 `wentse/v6d-invalid-move-reward`。镜像已预先构建，**不需要 build**。
+> **给执行本文件的 agent**：先完整读完本文件再动手。按「执行清单」的顺序做，每一步的检查都要做并记录输出。
+> 遇到「停下并报告」的情况，**不要自行变通**，把原样的命令输出发给 Wentse（陈文泽）等回复。
 
-v4 = v3 的全部修正 + 阶段切换时的 GPU 释放加固（见文末「镜像信息」）。
+## 执行清单（按顺序）
+
+### 硬性规则（任何时候都不能违反）
+
+1. **不要删除、移动、重命名任何 run 目录**（FSx 上的 `.../runs/...` 和 `SSP_DOCKER_WORKSPACE`）。checkpoint 只存在那里。
+2. **续跑的 run 不能改 suffix、seed、`--rounds`、`--steps-per-role` 或任何训练环境变量**；只允许换镜像和加三个 `CELL_*` 变量。
+3. **只用镜像 v4**（`…-invalidmove-20260924-v4`，digest 见文末）。`…-20260923`、`-v2`、`-v3` 一律不用。
+4. **一个 4×H200 节点只跑一个 run**。启动前 `nvidia-smi` 必须显示 4 张卡上没有进程。
+5. **不要在一个角色训练中途停 run**（除非本文件明确要求）：中途停会让该角色从 step 0 重训。要停就等该角色 final checkpoint 上传后。
+6. 每个 run 启动时都必须带上：`export CELL_STREAMING=1 CELL_ENFORCE_EAGER=0 CELL_SHARE_JUDGE_GPUS=0`。
+7. 不要上传基座权重、`wandb/`、`topic_labels.sqlite3` 或任何 key；不要把 token 写进文件或命令历史。
+
+### 要做的 4 个 run
+
+| run | 现状 | 要做的事 | suffix |
+| --- | --- | --- | --- |
+| PSRO s8888 | 已停（D1 在 step 120 因格式塌缩被保护机制停掉，容器已退出） | **v4 续跑**（任务 B） | `psro8_local_inv1-45906ffc-s8888-g8`（原样） |
+| PSRO s8889 | 在跑（A2） | **等 A2 结束后换 v4 续跑**（任务 C） | `psro8_local_inv1-45906ffc-s8889-g8`（原样） |
+| uniform（FSP） | 旧 run 用旧 reward（`shared_binary`），不可比 | **停掉旧的，v4 新 suffix 从头跑**（任务 D） | `uniform8_local_inv4_s8888` |
+| naive | 旧 run 用旧 reward，已停 | **v4 新 suffix 从头跑**（任务 D） | `naive6_local_inv4_s8888` |
+
+旧 naive / uniform run 的 checkpoint 与目录保留不动（规则 1），只是不再继续训练。
+
+**启动方式**：本文件的命令用 `docker/run_llama8b.sh`。如果你们用 Kubernetes / 自己的脚本启动（上一轮的 run 目录在
+`/shared/dedicated-fsx-…/home/zzhihan/selfplay/runs/…`，就是这种方式），就用**上一轮完全相同的启动方式**，只改两处：
+镜像换成 v4，环境变量里加三个 `CELL_*`。容器内的入口命令等价于
+`psro --run-suffix <suffix> --rounds 8 --steps-per-role 300`（uniform：`uniform … --rounds 8 --steps-per-role 300`；
+naive：`naive … --rounds 6 --steps-per-role 100`），FSx 目录挂在与上一轮相同的路径。
+
+### 任务 A：每个节点的准备（第 1–3 节）
+
+1. 按第 1 节拉取 v4 镜像；按第 2 节设置环境变量（包括三个 `CELL_*`）。
+2. `df -h <run 目录所在盘>`：可用空间 ≥ 150 GB，否则停下并报告。
+3. 按第 3 节 `prepare`、`check`：`check` 显示的 `git_sha` 必须是文末「镜像信息」里的构建 commit，否则停下并报告。
+4. 做 HF 写权限预检（第 3 节）。401/403 → 停下并报告（需要换 token）。
+
+### 任务 B：PSRO s8888 续跑（现在就做）
+
+按第 4 节末「已有的 PSRO run」逐条执行：同一个 FSx run 目录挂在同一路径、同一个 suffix、同样参数、v4 镜像 + `CELL_*`。
+- 启动前：`state.json` 和 `training/A1/ckpt/global_step240_hf/adapter_model.bin` 都存在，否则停下并报告。
+- 启动后 10 分钟内检查 driver 日志：
+  - 有 `no state at … initializing a fresh cold run` → **立刻停掉**并报告（没找到旧 run，会从头跑）。
+  - 有 `Training settings changed` 或 `Missing adapter checkpoint` → 停下并报告。
+  - 应看到 `next action: {'kind': 'oracle', 'role': 'defender', 'target': 'D1'}`，随后出现新的 W&B run `…s8888-g8__D1`。
+- D1 训练中每 30 分钟看 W&B `defender/cot_format_violation`：**连续 20 步 > 0.3 → 停掉 run 并报告**（上次就是这样塌缩的）。
+
+### 任务 C：PSRO s8889 换 v4（等时机）
+
+1. 不要打断 A2。等 HF 上出现 `psro8_local_inv1-45906ffc-s8889-g8 A2 step<N> (final)`，并且 driver 日志显示已进入收益格（`prefetching … payoff cell`）。
+2. 然后 `docker stop -t 180 <s8889 容器>`（或删除对应 pod），`nvidia-smi` 确认 4 卡空闲。
+3. 与任务 B 相同的方式、相同的检查续跑（suffix 换成 s8889 的）。启动后应看到 `next action` 为收益格（`kind: cell`）或下一个角色 D2，**不能**是 fresh run。
+
+### 任务 D：uniform 与 naive 从头跑
+
+1. 停掉仍在跑的旧 uniform 训练（`uniform-b`，旧 reward）。旧目录保留。
+2. 在各自的空闲节点上按第 4 节的 uniform / naive 命令启动（新 suffix，带 `CELL_*`）。
+3. 启动日志第一行应为 `Starting uniform: …; reward mode=legacy` / `Starting naive: …; reward mode=legacy`。
+   如果显示 `shared_binary`，停掉并报告。
+4. 节点不够时顺序：PSRO s8888 > PSRO s8889 > uniform > naive。
+
+### 任务 E：运行期间（每 30–60 分钟一次）
+
+按第 5 节的表检查每个 run。另外：
+- 每个角色结束后确认 HF 上出现该角色的 `(final)` checkpoint（含 `adapter_model.*`）；没有就按第 6 节手动上传。
+- W&B run 显示 `crashed` 不一定是故障（早停也显示 `crashed`）：看 `training/<角色>/early_stop.json`，
+  `returncode=0` 正常；`returncode=2`（COLLAPSE）或其他非 0 → 看 `training.log` 末尾 100 行并报告。
+- 某个 run 超过 2 小时既没有新的 W&B step 也没有新的 HF 上传 → 查容器/pod 是否还在（`docker ps -a`），把日志末尾报告。
+- 容器自动重试（最多 5 次）后仍失败 → 停下并报告，不要手动反复重启。
+
+### 需要报告给 Wentse 的内容
+
+- 每个 run 启动后：命令（去掉 token）、driver 日志前 30 行、`nvidia-smi`。
+- 每天一次：每个 run 当前角色和 step、已完成的角色列表、最近一次 HF 上传。
+- 任何「停下并报告」的情况：原样输出。
 
 ## 0. 节点要求
 
@@ -176,6 +248,7 @@ A1×D1：−0.748 到 −0.744 vs −0.744）。
 | 每个 attacker 阶段 | W&B `attacker/debug/n_generated_benign` | 大致持平（不应持续下降） | 降到接近 0 → 通知我们 |
 | 每个 attacker 阶段 | `topic/attacker_invalid_moves` | 逐步降到接近 0 | 持续上升 → 通知我们 |
 | 阶段结束 | W&B 显示 `crashed` | 早停正常现象；`training/<A_k>/early_stop.json` 里 `returncode=0` 即正常 | `returncode≠0` → 看 `training.log` 末尾 |
+| 每个 defender 阶段 | W&B `defender/cot_format_violation` | 接近 0（< 0.05） | 连续 20 步 > 0.3 → 停掉并报告（格式塌缩，会被保护机制以 returncode=2 停掉） |
 | A1 结束后 | 进入矩阵计算，约 30 分钟内开始 D1 | 出现新的 D1 W&B run | 超过 1 小时无新 run → 看 `<workspace>/psro/role_lora_zero_sum_psro/<suffix>/logs/cells/*.log`，确认有 `stream:` 行（没有说明第 2 节的 `CELL_*` 没生效） |
 
 在我们的 2×H200 测试里（同一 reward，A1 vs D0，截至 151 step），每批 benign 数量稳定在 26–36，
@@ -189,8 +262,8 @@ attacker 成功率 0.33 → 0.96，非法动作 0.38 → 0.02；用 step 40 chec
    `adapter_model.*`；上一轮自动上传静默失败了。失败时手动上传：
    ```bash
    huggingface-cli upload xudongwu/SafeSelfPlay-checkpoints \
-     <run>/training/A1/ckpt/global_step200_hf psro8_local_inv4_s8888/A1 \
-     --commit-message "psro8_local_inv4_s8888 A1 step200"
+     <run>/training/A1/ckpt/global_step<N>_hf <suffix>/A1 \
+     --commit-message "<suffix> A1 step<N>"
    ```
 2. 训练中每 50 step 把最新 checkpoint 上传到 `<suffix>/<A_k>/latest/`（覆盖）。
 3. 每算完一个收益格，上传 `<run>/state.json` 和 `<run>/matrices/`。
