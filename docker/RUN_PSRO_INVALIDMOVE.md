@@ -1,6 +1,7 @@
 # 全部实验重跑说明（invalid-move reward，镜像 v4，4×H200）
 
-本次**全部重跑**：PSRO（seed 8888、8889）+ uniform + naive，全部用镜像 **v4**、**新的 `--run-suffix`**（旧 run 不续跑）。
+PSRO（seed 8888、8889）：已有的 `inv1` run 用 v4 **原 suffix 续跑**（见第 4 节末「已有的 PSRO run」）。
+uniform + naive：旧 run 用的是 `shared_binary` reward，与新 PSRO 不可比，用 v4 + **新 suffix** 从头跑。
 代码：分支 `wentse/v6d-invalid-move-reward`。镜像已预先构建，**不需要 build**。
 
 v4 = v3 的全部修正 + 阶段切换时的 GPU 释放加固（见文末「镜像信息」）。
@@ -96,6 +97,17 @@ docker stop -t 180 ssp-psro-s8888  # 需要停止时
 - 失败会在容器内自动重试（最多 5 次，间隔 60 秒），从 `state.json` 续跑。
 - 已经在跑、但启动时没设第 2 节三个 `CELL_*` 变量的 run：`docker stop -t 180 <name>`，在 shell 里 export 这三个变量，
   再用**同一条命令、同一个 suffix** 重启。它们不是合约字段，已算好的格子保留，续跑不会被拒绝。
+
+### 已有的 PSRO run（invalid-move reward，`*_inv1_*`）改用 v4 续跑
+
+PSRO s8888 / s8889 的旧 run 与 v4 reward 完全相同，**不要从头跑**，用 v4 + **原来的 suffix** 续跑：
+已完成的角色和收益格全部保留，只有中断的那个角色从 step 0 重训（`PSRO_MIDRUN_RESUME=0`）。
+
+1. 选停机时机：**等当前角色的 final checkpoint 上传后**（进入收益格阶段）再停，否则该角色要重训。已经死掉的 run 直接重启。
+2. `docker stop -t 180 <旧容器名>`；`nvidia-smi` 确认 4 张卡空闲。
+3. 按第 1–2 节换成 v4 镜像并 export 三个 `CELL_*` 变量，再用**与原来完全相同的命令和 `--run-suffix`** 启动。
+   启动日志应显示 resume（不是 fresh run）；若报 `Training settings changed`，说明命令参数与原来不一致，停下来找我们。
+4. 重启前请把旧 run 的 `training/<中断的角色>/training.log` 最后 100 行发给我们，确认崩溃原因已在 v4 修复。
 
 ### 收益格加速设置（为什么要设第 2 节那三个 `CELL_*`）
 
