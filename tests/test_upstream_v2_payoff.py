@@ -119,9 +119,18 @@ class UpstreamV2RawRewardTest(unittest.TestCase):
             repository / "_modal_patches/patch_vllm_tokenizer.py"
         ).read_text(encoding="utf-8")
 
+        compat_source = (
+            repository / "roll/utils/vllm_tokenizer_compat.py"
+        ).read_text(encoding="utf-8")
         self.assertIn(
             '("transformers.tokenization_utils_tokenizers", '
             '"TokenizersBackend")',
+            compat_source,
+        )
+        # Streaming engines apply the same patch in each engine process.
+        self.assertIn(
+            'prepare="roll.utils.vllm_tokenizer_compat:'
+            '_patch_vllm_tokenizer_runtime_compat"',
             modal_source,
         )
         self.assertEqual(
@@ -134,7 +143,7 @@ class UpstreamV2RawRewardTest(unittest.TestCase):
         for constructor_offset in (
             offset
             for offset in range(len(modal_source))
-            if modal_source.startswith("                llm = LLM(", offset)
+            if modal_source.startswith("llm = LLM(", offset)
         ):
             prefix = modal_source[:constructor_offset]
             self.assertGreater(

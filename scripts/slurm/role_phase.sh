@@ -475,10 +475,20 @@ stop_service() {
   kill -KILL -- "-$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
 }
+# The judge runs its own Ray cluster; its vLLM actor leaves the judge's process
+# group, so a group kill can leave it holding GPU memory. Kill by temp dir.
+kill_marked() {
+  local marker=$1 pid
+  for pid in $(pgrep -u "$(id -u)" -f "$marker" 2>/dev/null || true); do
+    [ "$pid" = "$$" ] && continue
+    kill -KILL "$pid" 2>/dev/null || true
+  done
+}
 cleanup() {
   stop_service "$TOPIC_JUDGE_PID"
   stop_service "$OFFTOPIC_PID"
   stop_service "$JUDGE_PID"
+  [ -n "$JUDGE_PID" ] && kill_marked "/tmp/ssp-judge-$JUDGE_PORT"
   if [ "$RAY_STARTED" = 1 ]; then ray_shutdown; fi
 }
 trap cleanup EXIT

@@ -123,3 +123,37 @@ def _pgid(pid):
         return os.getpgid(pid)
     except ProcessLookupError:
         return None
+
+
+def test_training_release_kills_its_judge_actor_and_checks_every_card(monkeypatch):
+    cpl = load("scripts/slurm/cold_psro_local.py", "cpl_release_under_test")
+    waited = []
+    monkeypatch.setattr(cpl, "_wait_for_free_gpu",
+                        lambda python, gpu, log=None, need=None: waited.append((gpu, need)) or True)
+    monkeypatch.setenv("TOPIC_API_BASE_URL", "http://127.0.0.1:6292/v1")
+    monkeypatch.setenv("TOPIC_JUDGE_GPU", "3")
+
+    class Cfg:
+        ray_port, train_judge_port, gpus, python = 46991, 45992, 4, sys.executable
+
+    # the training judge's Ray actor: own session, ignores SIGTERM, marked by env
+    actor = stubborn({"RAY_TMPDIR": "/tmp/ssp-judge-45992"}, new_session=True)
+    trainer = stubborn({"RAY_TMPDIR": "/tmp/ssp-ray-46991"}, new_session=True)
+    bystander = stubborn({"RAY_TMPDIR": "/tmp/ssp-ray-99999"}, new_session=True)
+    time.sleep(0.5)
+    try:
+        cpl._release_training_gpus(Cfg)
+        assert actor.wait(timeout=10) == -signal.SIGKILL
+        assert trainer.wait(timeout=10) == -signal.SIGKILL
+        assert bystander.poll() is None
+        assert waited == [("0", None), ("1", None), ("2", None), ("3", 0.70)]
+    finally:
+        for proc in (actor, trainer, bystander):
+            if proc.poll() is None:
+                proc.kill()
+
+
+def test_role_phase_cleanup_kills_the_judge_ray_cluster():
+    text = (ROOT / "scripts/slurm/role_phase.sh").read_text()
+    body = text[text.index("cleanup() {"):text.index("trap cleanup EXIT")]
+    assert 'kill_marked "/tmp/ssp-judge-$JUDGE_PORT"' in body

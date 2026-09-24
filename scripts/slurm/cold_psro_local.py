@@ -198,9 +198,10 @@ def _gpu_free_fraction(python: str, gpu: str) -> float:
     return float(out.stdout.strip().splitlines()[-1])
 
 
-def _wait_for_free_gpu(python: str, gpu: str, log=log) -> bool:
-    """Block until the judge's card is actually free, instead of a fixed sleep."""
-    need = float(os.environ.get("CELL_JUDGE_GPU_FREE_FRACTION", "0.85"))
+def _wait_for_free_gpu(python: str, gpu: str, log=log, need: float | None = None) -> bool:
+    """Block until a card is actually free, instead of a fixed sleep."""
+    if need is None:
+        need = float(os.environ.get("CELL_JUDGE_GPU_FREE_FRACTION", "0.85"))
     deadline = time.time() + float(os.environ.get("CELL_JUDGE_RELEASE_TIMEOUT", "300"))
     free = 0.0
     while True:
@@ -212,10 +213,36 @@ def _wait_for_free_gpu(python: str, gpu: str, log=log) -> bool:
             log(f"  GPU {gpu} released ({free:.0%} free)")
             return True
         if time.time() >= deadline:
-            log(f"  WARNING: GPU {gpu} still only {free:.0%} free after the cell judge stopped; "
-                f"the next phase may fail to allocate and will be retried")
+            log(f"  WARNING: GPU {gpu} still only {free:.0%} free after its previous tenant "
+                f"stopped; the next phase may fail to allocate and will be retried")
             return False
         time.sleep(10)
+
+
+def _release_training_gpus(cfg: "Config") -> None:
+    """Leave no training process on any card before the judge and cells start.
+
+    role_phase.sh stops its Ray cluster and judges on exit, but its WildGuard
+    judge runs a private Ray cluster whose vLLM actor sits outside the judge's
+    process group, and an early stop can SIGKILL the phase before its trap
+    finishes. Either way a stray engine keeps its memory, and the next vLLM on
+    that card (the cell judge on GPU 0, a cell on 1-2) cannot allocate. Kill by
+    temp-dir marker, then confirm every card is free.
+    """
+    for marker in (f"/tmp/ssp-ray-{cfg.ray_port}", f"/tmp/ssp-judge-{cfg.train_judge_port}"):
+        _kill_processes_marked(marker)
+    _confirm_gpus_free(cfg)
+
+
+def _confirm_gpus_free(cfg: "Config") -> None:
+    """Wait until every card is free of the previous phase (bounded, non-fatal)."""
+    topic_gpu = None
+    if os.environ.get("TOPIC_API_BASE_URL", "").startswith("http://127.0.0.1"):
+        # The run-scoped topic judge stays up between phases (~13% of a card).
+        topic_gpu = os.environ.get("TOPIC_JUDGE_GPU", str(max(cfg.gpus - 1, 0)))
+    for gpu in range(cfg.gpus):
+        _wait_for_free_gpu(cfg.python, str(gpu), log,
+                           need=0.70 if str(gpu) == topic_gpu else None)
 
 
 # --- configuration ------------------------------------------------------------
@@ -711,6 +738,7 @@ def make_local_oracle_trainer(psro: Any, cfg: Config):
                 environment, training_log, criterion, checkpoint.parent
             )
             log(f"  early stop: {note}")
+        _release_training_gpus(cfg)
         stop_record = {"enabled": criterion is not None, "outcome": note,
                        "returncode": returncode,
                        **(criterion.report() if criterion else {})}
@@ -1327,6 +1355,9 @@ def main() -> int:
                 prefetch_cells(psro, cfg, state, judge)
             else:
                 judge.stop()
+                # Cell workers and their engines must be gone before training
+                # claims the cards; judge.stop() only confirms GPU 0.
+                _confirm_gpus_free(cfg)
                 os.environ.pop("CUDA_VISIBLE_DEVICES", None)
             result = psro.advance_cold_psro(**advance_kwargs)
             actions += 1

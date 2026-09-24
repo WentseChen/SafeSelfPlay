@@ -19,7 +19,21 @@ from typing import Any
 _STOP = "__stop__"
 
 
+def _die_with_parent() -> None:
+    """SIGKILL this engine if the cell worker dies, even by SIGKILL, so an
+    orphaned engine can never keep a GPU."""
+    try:
+        import ctypes
+        import signal
+
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGKILL)  # PR_SET_PDEATHSIG
+    except Exception:
+        pass
+
+
 def _engine_main(gpu: str, util: float, config: dict[str, Any], inbox, outbox) -> None:
+    _die_with_parent()
+    parent = os.getppid()
     os.environ["CUDA_VISIBLE_DEVICES"] = gpu
     try:
         if config.get("prepare"):
@@ -82,7 +96,16 @@ def _engine_main(gpu: str, util: float, config: dict[str, Any], inbox, outbox) -
         busy = engine.has_unfinished_requests()
         try:
             # Block only when idle; otherwise drain whatever has arrived.
-            item = inbox.get_nowait() if busy or stopping else inbox.get()
+            if busy or stopping:
+                item = inbox.get_nowait()
+            else:
+                while True:
+                    try:
+                        item = inbox.get(timeout=5)
+                        break
+                    except queue.Empty:
+                        if os.getppid() != parent:  # orphaned: exit, free the card
+                            return
             while True:
                 if item == _STOP:
                     stopping = True
