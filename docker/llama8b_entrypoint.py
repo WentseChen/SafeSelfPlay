@@ -8,7 +8,10 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
+import subprocess
 import sys
+import time
 
 
 BASE_MODEL = "mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated"
@@ -348,11 +351,50 @@ def main(argv=None) -> int:
         lock = lock_workspace(env)
         record_run_settings(args, env)
     print(f"Starting {args.command}: {BASE_MODEL}; reward mode={env['GAME_REWARD_MODE']}", flush=True)
-    if env.get("TOPIC_JUDGE_MANAGED") == "1" and env.get("DRY_RUN") != "1":
+    # The drivers resume from state.json, so a transient failure (a judge that
+    # has not released its card yet, a node hiccup) is recoverable by simply
+    # re-entering. Without this a container dies on the first one and, run
+    # with --rm, takes its logs with it. Stopping the container still stops at
+    # once: a signal raises SystemExit and is never retried.
+    retries = args.command in {"psro", "uniform", "naive"} and env.get("DRY_RUN") != "1"
+    return run_with_retries(command, env, retries)
+
+
+def run_with_retries(command: list[str], env: dict[str, str], retries: bool) -> int:
+    attempts = int(env.get("DRIVER_MAX_ATTEMPTS", "5")) if retries else 1
+    wait = float(env.get("DRIVER_RETRY_WAIT", "60"))
+    rc = 1
+    for attempt in range(1, attempts + 1):
+        if attempts > 1:
+            print(f"=== driver attempt {attempt}/{attempts} ===", flush=True)
+        rc = run_driver_once(command, env)
+        if rc == 0:
+            return 0
+        if attempt < attempts:
+            print(f"driver exited rc={rc}; resuming from saved state in {wait:.0f}s", flush=True)
+            time.sleep(wait)
+    return rc
+
+
+def run_driver_once(command: list[str], env: dict[str, str]) -> int:
+    if env.get("TOPIC_JUDGE_MANAGED") == "1":
         from roll.utils.local_topic_runtime import run_with_local_topic
         return run_with_local_topic(command, env, REPO)
-    os.execvpe(command[0], command, env)
-    return 0
+    child = subprocess.Popen(command, env=env, start_new_session=True)
+
+    def forward(signum, frame):
+        try:
+            os.killpg(child.pid, signum)
+        except ProcessLookupError:
+            pass
+        raise SystemExit(128 + signum)
+
+    prior = {sig: signal.signal(sig, forward) for sig in (signal.SIGTERM, signal.SIGINT)}
+    try:
+        return child.wait()
+    finally:
+        for sig, handler in prior.items():
+            signal.signal(sig, handler)
 
 
 if __name__ == "__main__":

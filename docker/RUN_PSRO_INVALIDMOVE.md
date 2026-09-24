@@ -22,10 +22,10 @@ git clone -b wentse/v6d-invalid-move-reward https://github.com/xudongwu-0/SafeSe
 cd SafeSelfPlay
 
 docker login ghcr.io          # 镜像为私有时需要；token 需 read:packages
-docker pull ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260923-v2
-docker tag  ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260923-v2 \
-            safeselfplay:llama8b-h200-invalidmove-20260923-v2
-export SSP_IMAGE=safeselfplay:llama8b-h200-invalidmove-20260923-v2
+docker pull ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260923-v3
+docker tag  ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260923-v3 \
+            safeselfplay:llama8b-h200-invalidmove-20260923-v3
+export SSP_IMAGE=safeselfplay:llama8b-h200-invalidmove-20260923-v3
 ```
 
 ## 2. 环境变量
@@ -111,7 +111,7 @@ attacker 成功率 0.33 → 0.96，非法动作 0.38 → 0.02；用 step 40 chec
 
 | 项目 | 值 |
 | --- | --- |
-| 镜像 | `ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260923-v2` |
+| 镜像 | `ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260923-v3` |
 | digest | `sha256:f6331a3846a22377bbdfda2ad3a43c46d45f2ee96bdae3c5b07090e16778cc22` |
 | 构建 commit（`check` 应显示） | `0356ca35ef3fc46d9b6030066db9f41b9e9dff47` |
 | 默认配置 | `GAME_REWARD_MODE=legacy`、`ATTACKER_INVALID_MOVE=1`、`RACE_CELLS=1`、4×H200 |

@@ -9,7 +9,7 @@
 
 **只跑 PSRO 两个 seed：直接按 [`docker/RUN_PSRO_INVALIDMOVE.md`](RUN_PSRO_INVALIDMOVE.md) 操作（使用预构建镜像，无需 build）。**
 
-**本版（分支 `wentse/v6d-invalid-move-reward`）默认 reward 改为 v6d + attacker 非法动作固定惩罚，见第 2 节。镜像标签为 `…-invalidmove-20260923-v2`（v2 含矩阵非法动作修正与 racing 默认）；已构建过旧镜像也必须重新 `build`，否则仍会运行旧代码。**
+**本版（分支 `wentse/v6d-invalid-move-reward`）默认 reward 改为 v6d + attacker 非法动作固定惩罚，见第 2 节。镜像标签为 `…-invalidmove-20260923-v3`（v2 含矩阵非法动作修正与 racing 默认）；已构建过旧镜像也必须重新 `build`，否则仍会运行旧代码。**
 
 训练模型：`mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated`。按顺序执行：**联网构建 → 选择 label → 下载模型 → 三组训练**。
 下列命令用于 Linux x86_64 / 4×H200 服务器的 Bash；Mac 用于下载和转交这个压缩包。
@@ -129,7 +129,7 @@ cd SafeSelfPlay-llama8b-h200
 进入代码目录后构建镜像：
 
 ```bash
-export SSP_IMAGE=safeselfplay:llama8b-h200-invalidmove-20260923-v2
+export SSP_IMAGE=safeselfplay:llama8b-h200-invalidmove-20260923-v3
 export SSP_DOCKER_WORKSPACE="$HOME/safeselfplay-data"
 export GPU_DEVICES=0,1,2,3
 

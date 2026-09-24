@@ -68,6 +68,8 @@ class Judge:
         self.cfg = cfg
         self.process: subprocess.Popen[bytes] | None = None
         self.url = f"http://127.0.0.1:{cfg.cell_judge_port}/classify"
+        self.gpu = "0"
+        self.ray_tmpdir = f"/tmp/coldpsro-judge-{cfg.cell_judge_port}"
 
     def _healthy(self) -> bool:
         payload = json.dumps(
@@ -90,8 +92,8 @@ class Judge:
             return self.url
         self.cfg.judge_log.parent.mkdir(parents=True, exist_ok=True)
         environment = self.cfg.base_env()
-        environment["CUDA_VISIBLE_DEVICES"] = "0"
-        environment["RAY_TMPDIR"] = f"/tmp/coldpsro-judge-{self.cfg.cell_judge_port}"
+        environment["CUDA_VISIBLE_DEVICES"] = self.gpu
+        environment["RAY_TMPDIR"] = self.ray_tmpdir
         command = [
             self.cfg.python, "-m", "openrlhf.cli.serve_wildguard",
             "--model_path", self.cfg.judge_model,
@@ -128,19 +130,92 @@ class Judge:
             return
         log("stopping cell judge")
         try:
-            os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
+            pgid = os.getpgid(self.process.pid)
+        except ProcessLookupError:
+            pgid = None
+        if pgid is not None:
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
         try:
             self.process.wait(timeout=120)
         except subprocess.TimeoutExpired:
+            pass
+        # The judge's model lives in a Ray actor, not in the process waited on
+        # above, so the leader can exit while the actor still holds GPU 0. The
+        # next training phase then puts its GPU-0 engine on a card that is still
+        # ~0.45 occupied and dies with "No available memory for the cache
+        # blocks" before W&B starts (seed 8889, 2026-09-23). Kill the whole
+        # group unconditionally, then anything of this judge's private Ray
+        # cluster that escaped the group, and wait for the card to be free.
+        if pgid is not None:
             try:
-                os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
+                os.killpg(pgid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
+        _kill_processes_marked(self.ray_tmpdir)
         self.process = None
-        # vLLM releases HBM only once the process group is fully reaped.
-        time.sleep(20)
+        _wait_for_free_gpu(self.cfg.python, self.gpu, log)
+
+
+def _kill_processes_marked(marker: str) -> list[int]:
+    """SIGKILL this user's processes whose command line or environment names ``marker``.
+
+    Ray starts its daemons and actor workers for a private cluster under the
+    driver's RAY_TMPDIR, and some of them leave the driver's process group, so a
+    group kill alone can miss the actor that holds the GPU.
+    """
+    me = {os.getpid(), os.getppid()}
+    uid = os.getuid()
+    needle = marker.encode()
+    killed = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit() or int(entry.name) in me:
+            continue
+        try:
+            if entry.stat().st_uid != uid:
+                continue
+            blob = (entry / "cmdline").read_bytes() + b"\0" + (entry / "environ").read_bytes()
+        except OSError:
+            continue
+        if needle in blob:
+            try:
+                os.kill(int(entry.name), signal.SIGKILL)
+                killed.append(int(entry.name))
+            except (ProcessLookupError, PermissionError):
+                pass
+    if killed:
+        log(f"  killed {len(killed)} leftover process(es) of {marker}")
+    return killed
+
+
+def _gpu_free_fraction(python: str, gpu: str) -> float:
+    probe = ("import torch; f, t = torch.cuda.mem_get_info(0); print(f / t)")
+    env = dict(os.environ, CUDA_VISIBLE_DEVICES=gpu)
+    out = subprocess.run([python, "-c", probe], env=env, capture_output=True,
+                         text=True, timeout=120)
+    return float(out.stdout.strip().splitlines()[-1])
+
+
+def _wait_for_free_gpu(python: str, gpu: str, log=log) -> bool:
+    """Block until the judge's card is actually free, instead of a fixed sleep."""
+    need = float(os.environ.get("CELL_JUDGE_GPU_FREE_FRACTION", "0.85"))
+    deadline = time.time() + float(os.environ.get("CELL_JUDGE_RELEASE_TIMEOUT", "300"))
+    free = 0.0
+    while True:
+        try:
+            free = _gpu_free_fraction(python, gpu)
+        except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+            free = 0.0
+        if free >= need:
+            log(f"  GPU {gpu} released ({free:.0%} free)")
+            return True
+        if time.time() >= deadline:
+            log(f"  WARNING: GPU {gpu} still only {free:.0%} free after the cell judge stopped; "
+                f"the next phase may fail to allocate and will be retried")
+            return False
+        time.sleep(10)
 
 
 # --- configuration ------------------------------------------------------------

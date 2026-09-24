@@ -2,7 +2,7 @@
 # Export an already-built image for docker load on another machine.
 set -euo pipefail
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-IMAGE=${SSP_IMAGE:-safeselfplay:llama8b-h200-invalidmove-20260923-v2}
+IMAGE=${SSP_IMAGE:-safeselfplay:llama8b-h200-invalidmove-20260923-v3}
 DEST=${1:-$REPO/output/releases/llama8b-labels-20260919/safeselfplay-llama8b-h200-labels.image.tar.gz}
 if [ -e "$DEST" ]; then
   echo "Output already exists: $DEST; choose a different filename." >&2
