@@ -46,6 +46,7 @@ from modal_upstream_selfredteam_role_lora import (
     _patch_upstream_defender_metric_keys,
     _patch_upstream_remote_rm_retry,
     _patch_upstream_role_lr_scheduler,
+    _patch_upstream_wildguard_input_cap,
     _stable_wildguard_rm_url,
 )
 from modal_upstream_selfredteam_role_full import (
@@ -1934,6 +1935,7 @@ def _prepare_lora_v2_upstream() -> None:
     _patch_optimizer_role_replay_filtering()
     _patch_single_role_advantage_normalization()
     _patch_upstream_remote_rm_retry()
+    _patch_upstream_wildguard_input_cap()
     _patch_upstream_comprehensive_wandb_logging()
     _patch_upstream_defender_metric_keys()
     _patch_reference_kl_monitoring()

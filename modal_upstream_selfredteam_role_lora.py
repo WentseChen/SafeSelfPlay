@@ -4221,6 +4221,90 @@ def _patch_upstream_remote_rm_retry() -> None:
     )
 
 
+def _patch_upstream_wildguard_input_cap() -> None:
+    """Keep every WildGuard query inside the judge's context window.
+
+    Generation is capped at 2048 *policy* (Llama-3) tokens per move, but WildGuard
+    re-tokenizes the text with its own (Mistral) tokenizer, where runs of symbols,
+    digits or whitespace cost 3-4x more. Attacker + defender at the cap can then
+    exceed the server's max_len (8192): vLLM rejects the prompt, the whole batch
+    returns HTTP 500, and the client retries it until training exits. vLLM 0.8.2
+    also leaves the batch's already-queued requests in the engine, so the next
+    call returns extra stale outputs ("Output count mismatch: expected 32, got 60").
+
+    Fix: cap each move at WILDGUARD_MOVE_MAX_TOKENS judge tokens (head kept) and
+    size the cap so the formatted query always fits; on any generate() failure,
+    drain the engine before re-raising so no stale output leaks into a later call.
+    """
+    path = UPSTREAM_WORK / "openrlhf/cli/serve_wildguard.py"
+    _replace_once(
+        path,
+        """        self.batch_size = args.batch_size
+""",
+        """        self.batch_size = args.batch_size
+        import os as _os
+        self.judge_tokenizer = self.llm.get_tokenizer()
+        # Reserve room for the WildGuard template and the 128-token verdict.
+        _budget = max(256, (int(args.max_len) - 512) // 2)
+        self.move_max_tokens = min(
+            int(_os.environ.get("WILDGUARD_MOVE_MAX_TOKENS", "2048")), _budget
+        )
+        self.capped_moves = 0
+
+    def _cap_move(self, text):
+        text = text or ""
+        ids = self.judge_tokenizer.encode(text, add_special_tokens=False)
+        if len(ids) <= self.move_max_tokens:
+            return text
+        self.capped_moves += 1
+        logger.warning(
+            f"WildGuard move capped: {len(ids)} -> {self.move_max_tokens} judge tokens "
+            f"(total capped so far {self.capped_moves}); head={text[:200]!r}"
+        )
+        return self.judge_tokenizer.decode(
+            ids[: self.move_max_tokens], skip_special_tokens=True
+        )
+
+    def _generate(self, prompts, sampling_params):
+        try:
+            return self.llm.generate(prompts, sampling_params)
+        except Exception:
+            # vLLM 0.8.2 does not abort requests already added by a failed
+            # generate(); drain them so they are not returned to the next call.
+            try:
+                self.llm._run_engine(use_tqdm=False)
+            except Exception:
+                pass
+            raise
+""",
+        "WildGuard judge-token cap helpers",
+    )
+    _replace_once(
+        path,
+        """            formatted_prompt = WILDGUARD_INPUT_FORMAT.format(
+                prompt=item["prompt"], 
+                response=item["response"]
+            )""",
+        """            formatted_prompt = WILDGUARD_INPUT_FORMAT.format(
+                prompt=self._cap_move(item["prompt"]),
+                response=self._cap_move(item["response"]),
+            )""",
+        "WildGuard per-move judge-token cap",
+    )
+    _replace_once(
+        path,
+        "                outputs = self.llm.generate(batch_prompts, sampling_params)",
+        "                outputs = self._generate(batch_prompts, sampling_params)",
+        "WildGuard batched generate drains on failure",
+    )
+    _replace_once(
+        path,
+        "            all_outputs = self.llm.generate(formatted_prompts, sampling_params)",
+        "            all_outputs = self._generate(formatted_prompts, sampling_params)",
+        "WildGuard generate drains on failure",
+    )
+
+
 def _patch_upstream_comprehensive_wandb_logging() -> None:
     """Restore the comprehensive ROLL-style W&B schema without changing RL."""
     actor_path = UPSTREAM_WORK / "openrlhf/trainer/ray/ppo_actor.py"
@@ -6230,6 +6314,7 @@ def _prepare_role_lora_upstream(
     _patch_upstream_comprehensive_wandb_logging()
     _patch_upstream_role_advantage_normalization()
     _patch_upstream_remote_rm_retry()
+    _patch_upstream_wildguard_input_cap()
     _patch_upstream_role_early_stopping()
     _patch_upstream_defender_metric_keys()
     if dynamic_role_sft:
