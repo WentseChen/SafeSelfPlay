@@ -1,4 +1,4 @@
-# 全部实验运行说明（invalid-move reward，镜像 v5，4×H200）
+# 全部实验运行说明（invalid-move reward，镜像 v6，4×H200）
 
 > **给执行本文件的 agent**：先完整读完本文件再动手。按「执行清单」的顺序做，每一步的检查都要做并记录输出。
 > 遇到「停下并报告」的情况，**不要自行变通**，把原样的命令输出发给 Wentse（陈文泽）等回复。
@@ -9,7 +9,7 @@
 
 1. **不要删除、移动、重命名任何 run 目录**（FSx 上的 `.../runs/...` 和 `SSP_DOCKER_WORKSPACE`）。checkpoint 只存在那里。
 2. **续跑的 run 不能改 suffix、seed、`--rounds`、`--steps-per-role` 或任何训练环境变量**；只允许换镜像和加三个 `CELL_*` 变量。
-3. **只用镜像 v5**（`…-invalidmove-20260924-v5`，digest 见文末）。`…-20260923`、`-v2`、`-v3` 一律不用。
+3. **只用镜像 v6**（`…-invalidmove-20260925-v6`，digest 见文末）。`…-20260923`、`-v2`、`-v3`、`-v4`、`-v6` 一律不用。
 4. **一个 4×H200 节点只跑一个 run**。启动前 `nvidia-smi` 必须显示 4 张卡上没有进程。
 5. **不要在一个角色训练中途停 run**（除非本文件明确要求）：中途停会让该角色从 step 0 重训。要停就等该角色 final checkpoint 上传后。
 6. 每个 run 启动时都必须带上：`export CELL_STREAMING=1 CELL_ENFORCE_EAGER=0 CELL_SHARE_JUDGE_GPUS=0`。
@@ -22,29 +22,29 @@
 
 | run | 现状 | 要做的事 | suffix |
 | --- | --- | --- | --- |
-| PSRO s8888 | 已停（D1 在 step 120 因格式塌缩被保护机制停掉，容器已退出） | **v5 续跑**（任务 B） | `psro8_local_inv1-45906ffc-s8888-g8`（原样） |
-| PSRO s8889 | 在跑（A2） | **等 A2 结束后换 v5 续跑**（任务 C） | `psro8_local_inv1-45906ffc-s8889-g8`（原样） |
-| uniform（FSP） | 旧 run 用旧 reward（`shared_binary`），不可比 | **停掉旧的，v5 新 suffix 从头跑**（任务 D） | `uniform8_local_inv4_s8888` |
-| naive | 旧 run 用旧 reward，已停 | **v5 新 suffix 从头跑**（任务 D） | `naive6_local_inv4_s8888` |
+| PSRO s8888 | 已停（D1 在 step 120 因格式塌缩被保护机制停掉，容器已退出） | **v6 续跑**（任务 B） | `psro8_local_inv1-45906ffc-s8888-g8`（原样） |
+| PSRO s8889 | 在跑（A2） | **等 A2 结束后换 v6 续跑**（任务 C） | `psro8_local_inv1-45906ffc-s8889-g8`（原样） |
+| uniform（FSP） | 旧 run 用旧 reward（`shared_binary`），不可比 | **停掉旧的，v6 新 suffix 从头跑**（任务 D） | `uniform8_local_inv4_s8888` |
+| naive | 旧 run 用旧 reward，已停 | **v6 新 suffix 从头跑**（任务 D） | `naive6_local_inv4_s8888` |
 
 旧 naive / uniform run 的 checkpoint 与目录保留不动（规则 1），只是不再继续训练。
 
 **启动方式**：本文件的命令用 `docker/run_llama8b.sh`。如果你们用 Kubernetes / 自己的脚本启动（上一轮的 run 目录在
 `/shared/dedicated-fsx-…/home/zzhihan/selfplay/runs/…`，就是这种方式），就用**上一轮完全相同的启动方式**，只改两处：
-镜像换成 v5，环境变量里加三个 `CELL_*`。容器内的入口命令等价于
+镜像换成 v6，环境变量里加三个 `CELL_*`。容器内的入口命令等价于
 `psro --run-suffix <suffix> --rounds 8 --steps-per-role 300`（uniform：`uniform … --rounds 8 --steps-per-role 300`；
 naive：`naive … --rounds 6 --steps-per-role 100`），FSx 目录挂在与上一轮相同的路径。
 
 ### 任务 A：每个节点的准备（第 1–3 节）
 
-1. 按第 1 节拉取 v5 镜像；按第 2 节设置环境变量（包括三个 `CELL_*`）。
+1. 按第 1 节拉取 v6 镜像；按第 2 节设置环境变量（包括三个 `CELL_*`）。
 2. `df -h <run 目录所在盘>`：可用空间 ≥ 150 GB，否则停下并报告。
 3. 按第 3 节 `prepare`、`check`：`check` 显示的 `git_sha` 必须是文末「镜像信息」里的构建 commit，否则停下并报告。
 4. 做 HF 写权限预检（第 3 节）。401/403 → 停下并报告（需要换 token）。
 
 ### 任务 B：PSRO s8888 续跑（现在就做）
 
-按第 4 节末「已有的 PSRO run」逐条执行：同一个 FSx run 目录挂在同一路径、同一个 suffix、同样参数、v5 镜像 + `CELL_*`。
+按第 4 节末「已有的 PSRO run」逐条执行：同一个 FSx run 目录挂在同一路径、同一个 suffix、同样参数、v6 镜像 + `CELL_*`。
 - 启动前：`state.json` 和 `training/A1/ckpt/global_step240_hf/adapter_model.bin` 都存在，否则停下并报告。
 - 启动后 10 分钟内检查 driver 日志：
   - 有 `no state at … initializing a fresh cold run` → **立刻停掉**并报告（没找到旧 run，会从头跑）。
@@ -52,7 +52,7 @@ naive：`naive … --rounds 6 --steps-per-role 100`），FSx 目录挂在与上�
   - 应看到 `next action: {'kind': 'oracle', 'role': 'defender', 'target': 'D1'}`，随后出现新的 W&B run `…s8888-g8__D1`。
 - D1 训练中每 30 分钟看 W&B `defender/cot_format_violation`：**连续 20 步 > 0.3 → 停掉 run 并报告**（上次就是这样塌缩的）。
 
-### 任务 C：PSRO s8889 换 v5（等时机）
+### 任务 C：PSRO s8889 换 v6（等时机）
 
 1. 不要打断 A2。等 HF 上出现 `psro8_local_inv1-45906ffc-s8889-g8 A2 step<N> (final)`，并且 driver 日志显示已进入收益格（`prefetching … payoff cell`）。
 2. 然后 `docker stop -t 180 <s8889 容器>`（或删除对应 pod），`nvidia-smi` 确认 4 卡空闲。
@@ -97,10 +97,10 @@ git clone -b wentse/v6d-invalid-move-reward https://github.com/xudongwu-0/SafeSe
 cd SafeSelfPlay
 
 docker login ghcr.io          # 镜像为私有时需要；token 需 read:packages
-docker pull ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260924-v5
-docker tag  ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260924-v5 \
-            safeselfplay:llama8b-h200-invalidmove-20260924-v5
-export SSP_IMAGE=safeselfplay:llama8b-h200-invalidmove-20260924-v5
+docker pull ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260925-v6
+docker tag  ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260925-v6 \
+            safeselfplay:llama8b-h200-invalidmove-20260925-v6
+export SSP_IMAGE=safeselfplay:llama8b-h200-invalidmove-20260925-v6
 ```
 
 ## 2. 环境变量
@@ -170,9 +170,9 @@ docker stop -t 180 ssp-psro-s8888  # 需要停止时
 - 已经在跑、但启动时没设第 2 节三个 `CELL_*` 变量的 run：`docker stop -t 180 <name>`，在 shell 里 export 这三个变量，
   再用**同一条命令、同一个 suffix** 重启。它们不是合约字段，已算好的格子保留，续跑不会被拒绝。
 
-### 已有的 PSRO run（invalid-move reward，`inv1`）改用 v5 续跑
+### 已有的 PSRO run（invalid-move reward，`inv1`）改用 v6 续跑
 
-PSRO s8888 / s8889 的旧 run 与 v5 的 reward、矩阵设置完全相同，**不要从头跑**，用 v5 + **原来的 run 目录和 suffix** 续跑：
+PSRO s8888 / s8889 的旧 run 与 v6 的 reward、矩阵设置完全相同，**不要从头跑**，用 v6 + **原来的 run 目录和 suffix** 续跑：
 已完成的角色和收益格全部保留，只有中断的那个角色从 step 0 重训（`PSRO_MIDRUN_RESUME=0`）。
 我们已用 v4 的代码对 s8888 在 HF 上的 `state.json` 做过续跑模拟：合约通过、A1 的 checkpoint SHA 校验通过，下一步正是训练 D1。
 
@@ -183,7 +183,7 @@ PSRO s8888 / s8889 的旧 run 与 v5 的 reward、矩阵设置完全相同，**�
    新 pod / 容器必须把同一个 FSx 目录挂在**同一个路径**，`SSP_ROOT` 指向同一个 run 目录。
 2. **同一个 suffix**：`psro8_local_inv1-45906ffc-s8888-g8` / `psro8_local_inv1-45906ffc-s8889-g8`（与原来逐字相同）。
 3. **同样的训练参数**：`TRAINING_SEED`、`--rounds 8`、`--steps-per-role 300` 以及其他环境变量与原来一致（不一致会报 `Training settings changed`，不会训练）。
-4. **镜像换成 v5**，并加上三个加速变量（它们不属于训练参数，加上不会导致上面的报错）：
+4. **镜像换成 v6**，并加上三个加速变量（它们不属于训练参数，加上不会导致上面的报错）：
    ```bash
    export CELL_STREAMING=1 CELL_ENFORCE_EAGER=0 CELL_SHARE_JUDGE_GPUS=0
    ```
@@ -204,7 +204,7 @@ ls $RUN/state.json $RUN/training/A1/ckpt/global_step240_hf/adapter_model.bin   #
 （进入收益格阶段）再 `docker stop -t 180`，否则当前角色要从 step 0 重训。
 
 **s8888 的 D1 要盯一下**：上次 D1 在 step 90 之后 defender 的 CoT 格式违规率升到 91%→100%，被塌缩保护（abort）主动停掉，
-这是训练不稳定，不是代码 bug。v5 会从 step 0 重训 D1（失败自动重试最多 5 次）。请看 W&B
+这是训练不稳定，不是代码 bug。v6 会从 step 0 重训 D1（失败自动重试最多 5 次）。请看 W&B
 `defender/cot_format_violation`：**连续 20 步超过 0.3 就停掉并通知我们**，不要让它把 5 次重试都跑完。
 
 备份：s8888 的 A1 final checkpoint 与 `state.json` 在 HF（`xudongwu/SafeSelfPlay-checkpoints/psro8_local_inv1-45906ffc-s8888-g8/`），
@@ -276,10 +276,12 @@ attacker 成功率 0.33 → 0.96，非法动作 0.38 → 0.02；用 step 40 chec
 
 | 项目 | 值 |
 | --- | --- |
-| 镜像 | `ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260924-v5` |
-| digest | `sha256:0bac5d685d09ab516b23c7f421a98121d002ff706266fd2861ebc924ba676176` |
+| 镜像 | `ghcr.io/wentsechen/safeselfplay:llama8b-h200-invalidmove-20260925-v6` |
+| digest | `sha256:4df8a3c5bc9ee375fdf10e63c462fbf69515fdf48f7d6c4d66ebb330cc9a470b` |
 | 构建 commit（`check` 应显示） | `98254744f30d24d5e1808b809c782910cfb7a6fc` |
 | 默认配置 | `GAME_REWARD_MODE=legacy`、`ATTACKER_INVALID_MOVE=1`、`RACE_CELLS=1`、`CELL_STREAMING=0`、4×H200（`CELL_STREAMING` 由第 2 节改为 1） |
+
+**v6 相对 v5（修复 A4 训练崩溃，所有 run 都应换 v6）**：WildGuard judge 输入超长导致训练退出的 bug。生成长度按策略模型 tokenizer 限 2048/步，但 WildGuard 用自己的 tokenizer 重新计数，连续符号/数字/空白会膨胀 3–4 倍，攻击+防守拼起来可超过 judge 的 8192 上限：vLLM 拒绝整批（HTTP 500，`Prompt length of 14500 is longer than the maximum model length of 8192`），且把该批已入队的请求留在引擎里，下一批返回多余结果（`Output count mismatch: expected 32, got 60`），客户端重试 12 次后训练退出。v6 在 judge 服务端把每一步截到 2048 个 WildGuard token（正常文本不受影响，截断会在 judge 日志打印 `WildGuard move capped`），并在 generate 失败时清空引擎。真实 WildGuard（H200）冒烟测试：旧代码复现上述两个报错；v6 三批全部 200、32/32 标签，正常样本标签与旧代码完全一致。其余训练、reward、设置与 v5 完全相同。**崩溃的 run 用 v6 + 原 run 目录 + 原 suffix 续跑**（不要换 suffix、不要从头跑）；其它在跑的 run 可在下次重启时换 v6。构建 commit `457a03e`。
 
 **v5 相对 v4**：topic judge 服务端合并并发请求成批生成，本地 judge 客户端并发 4→32（256 条改写 13.7 s → 3.4 s，255/256 判定相同），
 训练每步约快 4 秒，收益格也更快。其余训练、reward、设置与 v4 完全相同；v4 上的 run 可直接用 v5、同一 suffix 续跑。
