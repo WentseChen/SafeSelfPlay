@@ -1,6 +1,6 @@
 # PSRO 重跑运行说明（v6）
 
-**目的：** 用主 run 的 reward 和 seed 重跑一条 PSRO，到第 5 代和 6×6 矩阵，检查结果能否重现、有没有其他问题。
+**目的：** 用主 run 的 reward、换一个新的 seed（8891）重跑一条 PSRO，到第 5 代和 6×6 矩阵，检查结果能否重现、有没有其他问题。
 **截止：** ET 11-11 18:00 前跑完。来不及就交已完成的世代。
 **规模：** 一个 4×H200 141GB 节点。时长只有估计值：约 40–65 小时，具体以实测为准。
 **有问题先问 Wentse，不要自行改设定。**
@@ -54,7 +54,7 @@ export SSP_IMAGE=safeselfplay:llama8b-h200-invalidmove-20260925-v6
 export SSP_DOCKER_WORKSPACE="$HOME/safeselfplay-data"
 export GPU_DEVICES=0,1,2,3
 export TOPIC_JUDGE_BACKEND=local RUN_LABELER=local
-export TRAINING_SEED=8889
+export TRAINING_SEED=8891
 export CELL_STREAMING=1 CELL_ENFORCE_EAGER=0 CELL_SHARE_JUDGE_GPUS=0
 
 read -rsp 'HF token: ' HF_TOKEN; echo; export HF_TOKEN
@@ -86,7 +86,7 @@ bash docker/run_llama8b.sh check
 
 ```bash
 SAVE_STEPS_CONTRACT=1 bash docker/run_llama8b.sh psro \
-  --run-suffix "psro_smoke_s8889" --rounds 1 --steps-per-role 2 --matrix-episodes 256
+  --run-suffix "psro_smoke_s8891" --rounds 1 --steps-per-role 2 --matrix-episodes 256
 ```
 
 失败就把最后 50 行日志发给 Wentse，不要继续。
@@ -94,10 +94,10 @@ SAVE_STEPS_CONTRACT=1 bash docker/run_llama8b.sh psro \
 ## 6. 正式启动
 
 ```bash
-DETACH=1 CONTAINER_NAME=ssp-psro-s8889 bash docker/run_llama8b.sh psro \
-  --run-suffix "psro5_rerun_v6_s8889" --rounds 5 --steps-per-role 300
+DETACH=1 CONTAINER_NAME=ssp-psro-s8891 bash docker/run_llama8b.sh psro \
+  --run-suffix "psro5_rerun_v6_s8891" --rounds 5 --steps-per-role 300
 
-docker logs -f ssp-psro-s8889
+docker logs -f ssp-psro-s8891
 ```
 
 **日志里必须出现 `Starting psro: …; reward mode=legacy`。** 如果显示 `shared_binary`，立刻停掉并告诉 Wentse。
@@ -105,7 +105,7 @@ docker logs -f ssp-psro-s8889
 要停止时：
 
 ```bash
-docker stop -t 180 ssp-psro-s8889
+docker stop -t 180 ssp-psro-s8891
 ```
 
 中断后，用同样的环境变量和同一条命令续跑。容器内失败也会自动重试。**角色训练中途停掉，该角色会从第 0 步重训**，尽量等角色结束再停。
@@ -120,7 +120,7 @@ docker stop -t 180 ssp-psro-s8889
 | `state.json` 里的 `stage` | 按 A1、D1、收益矩阵、A2、D2……前进 | 超过 2 小时没变化就检查容器是否还在（`docker ps -a`） |
 | `matrices/` | 每一代后出现新矩阵 | 没有出现就告诉 Wentse |
 
-运行目录是 `$SSP_DOCKER_WORKSPACE/psro/role_lora_zero_sum_psro/psro5_rerun_v6_s8889/`。
+运行目录是 `$SSP_DOCKER_WORKSPACE/psro/role_lora_zero_sum_psro/psro5_rerun_v6_s8891/`。
 
 ## 8. 交付
 
