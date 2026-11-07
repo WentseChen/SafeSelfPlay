@@ -6,7 +6,11 @@
 
 和 FSP、PSRO 一样用 Docker；不同的是这个镜像在你的机器上从源码构建（和 9 月那次交付相同），不用从 ghcr 拉。
 
-## 1. 构建镜像（只做一次，约 20–30 分钟）
+**已实测（11-07，Lambda 1×A100）：** `build` 约 5 分钟，镜像 21.8 GB；`check` 通过；`prepare` 约 5 分钟，下载 46 GB；镜像内 judge 按 MAGIC 的 reward 代码打分正确。训练在 rhea 4×H200 上跑过 24 步（不是用这个镜像）。
+
+**如果 `docker` 要 sudo**（报 permission denied）：`sudo usermod -aG docker $USER`，然后重新登录；没有 sudo 权限就请管理员加。
+
+## 1. 构建镜像（只做一次，约 5–10 分钟）
 
 ```bash
 git clone -b wentse/rebuttal-runbooks https://github.com/WentseChen/SafeSelfPlay.git
@@ -23,7 +27,7 @@ ENV 2.6.0+cu124 0.8.5.post1 4.51.3 2.7.4.post1 gpus 4
 1
 ```
 
-## 2. 下载模型并建底座（不占 GPU，约 50 GB）
+## 2. 下载模型并建底座（不占 GPU，约 46 GB，约 5 分钟）
 
 ```bash
 export MAGIC_DOCKER_WORKSPACE=$HOME/magic-workspace     # 换成有 500 GB 空间的目录
