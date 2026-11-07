@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Train MAGIC on 4 GPUs with the abliterated defender base. Resumes from the latest checkpoint if one exists.
-# Usage: MAGIC_HOME=... CUDA_VISIBLE_DEVICES=0,1,2,3 bash docker/magic/run.sh
+# Usage: bash docker/run_magic.sh train (Docker), or MAGIC_HOME=... CUDA_VISIBLE_DEVICES=0,1,2,3 bash docker/magic/run.sh
 # Layout: 2 GPUs per role (MAGIC's paper: 4), Qwen3Guard judge served on the first GPU with 20% of its memory.
 set -eu -o pipefail
-M=${MAGIC_HOME:?}; C=$M/code
+M=${MAGIC_HOME:?}; C=${MAGIC_CODE:-$M/code}   # inside the Docker image MAGIC_CODE=/opt/magic
 export HF_HOME=${HF_HOME:-$M/hf_cache} HF_HUB_OFFLINE=1 TMPDIR=$M/tmp
 # Ray puts its sockets under RAY_TMPDIR; Unix socket paths must stay under 107 bytes, so keep it short.
 export RAY_TMPDIR=${RAY_TMPDIR:-/tmp/rw_magic}
 mkdir -p $TMPDIR $RAY_TMPDIR $M/logs
-export PATH=$M/env/bin:$PATH CUDA_HOME=${CUDA_HOME:-/usr/local/cuda} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
+[ -d $M/env/bin ] && export PATH=$M/env/bin:$PATH   # venv install; the Docker image uses its system Python
+export CUDA_HOME=${CUDA_HOME:-/usr/local/cuda} CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
 first_gpu=${CUDA_VISIBLE_DEVICES%%,*}
 snap() { ls -d $HF_HOME/hub/models--$1/snapshots/* | head -1; }
 export MODEL_DEFENDER_BASE=$M/llama31_abl_ittok

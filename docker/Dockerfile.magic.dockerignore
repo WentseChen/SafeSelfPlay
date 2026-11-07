@@ -1,0 +1,3 @@
+# Only the MAGIC run scripts go into this image; MAGIC itself is cloned at build time.
+*
+!docker/magic/

@@ -1,0 +1,48 @@
+# syntax=docker/dockerfile:1
+# MAGIC baseline (AI45Lab/MAGIC, formerly BattleWen/MAGIC) on the abliterated Llama-3.1-8B, 4xH200.
+# Ubuntu 22.04 ships Python 3.10, which MAGIC requires; versions follow MAGIC's README and requirements.
+FROM nvidia/cuda:12.4.1-cudnn-devel-ubuntu22.04
+
+USER root
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONUNBUFFERED=1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-dev python3-pip python3-venv git curl ca-certificates build-essential procps \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf "$(command -v python3)" /usr/local/bin/python
+
+RUN python -m pip install --no-cache-dir -U pip wheel setuptools \
+    && python -m pip install --no-cache-dir torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+
+# MAGIC code at the commit we ran, plus the one-line upstream fix for the undefined seed_prompt.
+COPY docker/magic/seed_prompt.patch /opt/seed_prompt.patch
+RUN git clone -q -b 20260922-qwen2.5-vllm0.8.5 https://github.com/AI45Lab/MAGIC.git /opt/magic \
+    && git -C /opt/magic checkout -q 85a96985a4e7cb01fec8084b6a6bd9df3762362d \
+    && git -C /opt/magic apply /opt/seed_prompt.patch \
+    && cd /opt/magic/src/360-LLaMA-Factory && python -m pip install --no-cache-dir -e . \
+    && cd /opt/magic/src/verl && python -m pip install --no-cache-dir -e . \
+    && cd /opt/magic && python -m pip install --no-cache-dir -r requirements.txt \
+    && python -m pip install --no-cache-dir \
+       https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl \
+    && python -c "import torch, vllm, transformers, flash_attn; print('ENV', torch.__version__, vllm.__version__, transformers.__version__, flash_attn.__version__)" \
+    && python -m pip freeze > /opt/runtime-packages.txt
+
+COPY docker/magic/ /opt/magic-run/
+
+ARG SSP_GIT_SHA=unknown
+ARG SSP_BUILD_DATE=unknown
+LABEL org.opencontainers.image.source="https://github.com/WentseChen/SafeSelfPlay" \
+      org.opencontainers.image.revision="$SSP_GIT_SHA" \
+      org.opencontainers.image.created="$SSP_BUILD_DATE" \
+      org.opencontainers.image.title="MAGIC baseline on abliterated Llama-3.1-8B (4xH200)"
+RUN printf 'git_sha=%s\nbuild_date=%s\nmagic_commit=%s\n' "$SSP_GIT_SHA" "$SSP_BUILD_DATE" \
+      "$(git -C /opt/magic rev-parse HEAD)" > /opt/BUILD_INFO
+
+# Code and environment live in the image; model caches, the defender base and checkpoints live on /workspace.
+ENV MAGIC_HOME=/workspace \
+    MAGIC_CODE=/opt/magic \
+    HF_HOME=/workspace/hf \
+    HF_HUB_DISABLE_XET=1 \
+    TOKENIZERS_PARALLELISM=false
+WORKDIR /opt/magic
