@@ -1,0 +1,13 @@
+diff --git a/src/verl/verl/separated_trainer/ppo/multi_agent_rollout.py b/src/verl/verl/separated_trainer/ppo/multi_agent_rollout.py
+index 8d3238d..475f399 100644
+--- a/src/verl/verl/separated_trainer/ppo/multi_agent_rollout.py
++++ b/src/verl/verl/separated_trainer/ppo/multi_agent_rollout.py
+@@ -461,6 +461,8 @@ class MultiAgentRollout:
+         for i, idx in enumerate(unfinished_indices):
+             raw_output = current_outputs[i]
+             clean_output = raw_output.replace(finish_flag, "").rstrip() if finish_flag else raw_output
++            # Upstream bug (also on main): seed_prompt was never defined here; same lookup as line 508.
++            seed_prompt = problem_inputs[idx].get("seed_prompt") or problem_inputs[idx].get("question", "")
+             adv_used = False
+             adv_fallback = False
+             if role == agent_roles[0] and train_role == defender_role:
