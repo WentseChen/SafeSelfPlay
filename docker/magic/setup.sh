@@ -21,11 +21,11 @@ git -C code log -1 --format='MAGIC code %H'
 P=$M/env/bin/python
 $P -m pip -q install -U pip wheel setuptools
 $P -m pip -q install torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+# flash-attn before MAGIC: verl/LLaMA-Factory depend on it and a source build fails without torch in the build env.
+$P -m pip -q install https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
 ( cd code/src/360-LLaMA-Factory && $P -m pip -q install -e . )
 ( cd code/src/verl && $P -m pip -q install -e . )
 ( cd code && $P -m pip -q install -r requirements.txt )
-# Building flash-attn from source fails on many machines; use the official prebuilt wheel for torch 2.6 / cu12 / py310.
-$P -m pip -q install https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
 $P -c "import torch, vllm, transformers, flash_attn; print('ENV', torch.__version__, vllm.__version__, transformers.__version__, flash_attn.__version__)"
 # Expect: ENV 2.6.0+cu124 0.8.5.post1 4.51.3 2.7.4.post1
 

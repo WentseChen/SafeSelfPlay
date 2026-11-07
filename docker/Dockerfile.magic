@@ -13,7 +13,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf "$(command -v python3)" /usr/local/bin/python
 
 RUN python -m pip install --no-cache-dir -U pip wheel setuptools \
-    && python -m pip install --no-cache-dir torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+    && python -m pip install --no-cache-dir torch==2.6.0 --index-url https://download.pytorch.org/whl/cu124 \
+    && python -m pip install --no-cache-dir https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
+# flash-attn first, from the official prebuilt wheel: verl/LLaMA-Factory pull it in as a dependency, and building it
+# from source fails (its build step imports torch, which pip's isolated build env does not have).
 
 # MAGIC code at the commit we ran, plus the one-line upstream fix for the undefined seed_prompt.
 COPY docker/magic/seed_prompt.patch /opt/seed_prompt.patch
@@ -23,8 +26,6 @@ RUN git clone -q -b 20260922-qwen2.5-vllm0.8.5 https://github.com/AI45Lab/MAGIC.
     && cd /opt/magic/src/360-LLaMA-Factory && python -m pip install --no-cache-dir -e . \
     && cd /opt/magic/src/verl && python -m pip install --no-cache-dir -e . \
     && cd /opt/magic && python -m pip install --no-cache-dir -r requirements.txt \
-    && python -m pip install --no-cache-dir \
-       https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl \
     && python -c "import torch, vllm, transformers, flash_attn; print('ENV', torch.__version__, vllm.__version__, transformers.__version__, flash_attn.__version__)" \
     && python -m pip freeze > /opt/runtime-packages.txt
 
