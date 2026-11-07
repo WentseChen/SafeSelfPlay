@@ -3,7 +3,7 @@
 # No GPU needed. Usage: MAGIC_HOME=/path/with/200GB bash docker/magic/setup.sh
 set -eu -o pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
-M=${MAGIC_HOME:?set MAGIC_HOME to a directory with about 200 GB free}
+M=${MAGIC_HOME:?set MAGIC_HOME to a directory with about 500 GB free (checkpoints are ~110 GB each)}
 mkdir -p $M && cd $M
 export HF_HOME=${HF_HOME:-$M/hf_cache} HF_HUB_DISABLE_XET=1 TMPDIR=$M/tmp PIP_CACHE_DIR=$M/pipcache
 mkdir -p $TMPDIR

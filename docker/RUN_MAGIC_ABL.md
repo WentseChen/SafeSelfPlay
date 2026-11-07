@@ -2,7 +2,7 @@
 
 **目的：** 用 MAGIC 官方代码（[AI45Lab/MAGIC](https://github.com/AI45Lab/MAGIC)，原 BattleWen/MAGIC），从和我们 PSRO 相同的底座（abliterated Llama-3.1-8B）出发训练，和 PSRO 做公平比较。
 
-**需要：** Linux x86_64，4×H200 141GB，NVIDIA 驱动、Docker、NVIDIA Container Toolkit（和跑 FSP、PSRO 的要求相同），约 200 GB 磁盘，能访问 GitHub、Hugging Face。代码和模型都是公开的，不需要任何 token。
+**需要：** Linux x86_64，4×H200 141GB，NVIDIA 驱动、Docker、NVIDIA Container Toolkit（和跑 FSP、PSRO 的要求相同），约 **500 GB** 磁盘（模型约 50 GB；每个 checkpoint 含两个模型和 optimizer，约 110 GB，会保留最新两个加第 200、300 步），能访问 GitHub、Hugging Face。代码和模型都是公开的，不需要任何 token。
 
 和 FSP、PSRO 一样用 Docker；不同的是这个镜像在你的机器上从源码构建（和 9 月那次交付相同），不用从 ghcr 拉。
 
@@ -26,7 +26,7 @@ ENV 2.6.0+cu124 0.8.5.post1 4.51.3 2.7.4.post1 gpus 4
 ## 2. 下载模型并建底座（不占 GPU，约 50 GB）
 
 ```bash
-export MAGIC_DOCKER_WORKSPACE=$HOME/magic-workspace     # 换成有 200 GB 空间的目录
+export MAGIC_DOCKER_WORKSPACE=$HOME/magic-workspace     # 换成有 500 GB 空间的目录
 bash docker/run_magic.sh prepare 2>&1 | tee magic_prepare.log
 ```
 
