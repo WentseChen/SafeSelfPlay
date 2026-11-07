@@ -60,14 +60,14 @@ export CELL_STREAMING=1 CELL_ENFORCE_EAGER=0 CELL_SHARE_JUDGE_GPUS=0
 read -rsp 'HF token: ' HF_TOKEN; echo; export HF_TOKEN
 read -rsp 'W&B key: ' WANDB_API_KEY; echo; export WANDB_API_KEY
 export WANDB_MODE=online
-export WANDB_ENTITY=2373025856w-the-university-of-hong-kong
+export WANDB_ENTITY=cwz19
 export WANDB_PROJECT=self-play
 export WANDB_GROUP=rebuttal-v6
 ```
 
 `HF_TOKEN` 需要有 `allenai/wildguard` 的读取权限。
 
-你的 W&B 账号要先加入上面的 team，否则写不进去，找 Wentse 加。训练代码会把 W&B key 写进 run config，team 成员看得到，所以请用单独的账号或跑完后作废这个 key。
+W&B key 由 Wentse 单独提供，不要写进文件或发到别处。
 
 要上传 checkpoint 时，由 Wentse 提供 repo，再设置 `HF_CHECKPOINT_REPO`。
 
