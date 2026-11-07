@@ -19,6 +19,8 @@ export REWARD_SCORE_MAX_WORKERS=16
 # Response cap 2048 instead of MAGIC's 6144 (agreed for compute; about 0.6% of defender replies exceed it, and
 # MAGIC's own mask_unfinished_reward gives truncated replies zero reward).
 export MAX_RESP=${MAX_RESP:-2048}
+# Smoke tests only: fewer GPUs per role and fewer steps. Real runs keep 2 per role and 300 steps.
+GPUS_PER_ROLE=${GPUS_PER_ROLE:-2}; TOTAL_STEPS=${TOTAL_STEPS:-300}
 export WANDB_MODE=offline RAY_MASTER_PORT=${RAY_MASTER_PORT:-6391} CHECKPOINT_DIR=$M/ckpt
 # MAGIC's reward code only parses Qwen3Guard output ("Safety:", "Refusal:") from a model served as "orm".
 JPORT=${JPORT:-18471}
@@ -35,8 +37,10 @@ echo "=== judge up $(date -Is)"
 
 # MAGIC's public script with only these changes: 4 GPUs (2 per role), resumable, our run name, checkpoint every 25 steps,
 # console logging, no per-step dump of training generations (logging only, ~95 s/step), and the response cap.
-sed -e 's/--num-gpus 8/--num-gpus 4/' \
-    -e 's/trainer.n_gpus_per_node=4/trainer.n_gpus_per_node=2/' \
+sed -e "s/--num-gpus 8/--num-gpus $((2*GPUS_PER_ROLE))/" \
+    -e "s/trainer.n_gpus_per_node=4/trainer.n_gpus_per_node=$GPUS_PER_ROLE/" \
+    -e "s/trainer.total_training_steps=300/trainer.total_training_steps=$TOTAL_STEPS/" \
+    -e 's/actor_rollout_ref.actor.optim.lr=1e-6/actor_rollout_ref.actor.optim.lr=1e-6 \\\n  actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_MEM:-0.5}/' \
     -e 's/trainer.resume_mode=disable/trainer.resume_mode=auto/' \
     -e 's/experiment_name="D-q257bi-A-q257bi-${timestamp}"/experiment_name="D-llama31abl-A-magicsft"/' \
     -e 's/trainer.save_freq=15/trainer.save_freq=25/' \
