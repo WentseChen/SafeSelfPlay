@@ -2,7 +2,9 @@
 
 **目的：** 用 MAGIC 官方代码（[AI45Lab/MAGIC](https://github.com/AI45Lab/MAGIC)，原 BattleWen/MAGIC），从和我们 PSRO 相同的底座（abliterated Llama-3.1-8B）出发训练，和 PSRO 做公平比较。
 
-**需要：** Linux x86_64，4×H200 141GB，NVIDIA 驱动、Docker、NVIDIA Container Toolkit（和跑 FSP、PSRO 的要求相同），约 **500 GB** 磁盘（模型约 50 GB；每个 checkpoint 含两个模型和 optimizer，约 110 GB，会保留最新两个加第 200、300 步），能访问 GitHub、Hugging Face。代码和模型都是公开的，不需要任何 token。
+**需要：** Linux x86_64，4×H200 141GB，NVIDIA 驱动、Docker、NVIDIA Container Toolkit（和跑 FSP、PSRO 的要求相同），约 **600 GB** 磁盘（模型约 50 GB；每个完整 checkpoint 含两个模型和 optimizer，约 126 GB，只保留最新两个；第 100、200、…、600 步只留 defender 权重，每个约 32 GB），能访问 GitHub、Hugging Face。代码和模型都是公开的，不需要任何 token。
+
+**11-09 更新：** 回答上限改回论文的 6144，最多跑 600 步，收敛就提前停（见第 3 节）。之前已经 build 过镜像的话，`git pull` 后重新 `build` 一次（只有最后一层会变，很快）；已经用旧设置开始训练的话，停掉，换一个新的空 `MAGIC_DOCKER_WORKSPACE` 从头跑，不要接旧的 checkpoint。
 
 和 FSP、PSRO 一样用 Docker；不同的是这个镜像在你的机器上从源码构建（和 9 月那次交付相同），不用从 ghcr 拉。
 
@@ -47,7 +49,8 @@ docker logs -f magic-abl
 - 如果这台机器同时在跑 PSRO 或 FSP，`GPU_DEVICES` 要选另外 4 张空卡。端口冲突时可设 `RAY_MASTER_PORT=6491 JPORT=18571`。
 - 启动约 4 分钟：先起 judge，再加载两个模型。
 - 中断后用同一条命令重跑，会从最新的 checkpoint 接着跑（每 25 步存一次）。停止用 `docker stop -t 180 magic-abl`。
-- 共 300 步。我们在 4×H200 上量到每步 180–200 秒（回答上限 6144 时）；改成 2048 后预计 100–150 秒，300 步约 9–13 小时。
+- 最多 600 步，回答上限 6144（和 MAGIC 论文相同）。我们在 4×H200 上量到每步 180–200 秒，600 步约 30–33 小时。
+- **收敛就提前停：** 第 300 步以后，如果验证分数（`val/test_score/game`，每 15 步一次）连续 6 次（90 步）都没有比最好成绩高出 0.01，脚本会在下一个完整 checkpoint 存好后自动停止训练，并写入 `$MAGIC_DOCKER_WORKSPACE/logs/CONVERGED`。之后再执行训练命令会直接退出；确实要继续训练时加 `FORCE=1`。
 
 **看进度：**
 
@@ -55,6 +58,7 @@ docker logs -f magic-abl
 W=$MAGIC_DOCKER_WORKSPACE
 grep -aoE "step:[0-9]+ - " $W/logs/train.log | tail -1
 grep -aoE "timing_s/step:[0-9.]+" $W/logs/train.log | tail -3
+cat $W/logs/early_stop.txt          # 验证分数的最好成绩、多久没进步
 nvidia-smi
 ```
 
@@ -72,7 +76,7 @@ nvidia-smi
 
 ## 4. 跑完之后
 
-把第 200 步和第 300 步的 checkpoint（`$MAGIC_DOCKER_WORKSPACE/ckpt/Game-separated/D-llama31abl-A-magicsft/global_step_{200,300}/defender`）传给 Wentse，评测由我们来做。
+把 `$MAGIC_DOCKER_WORKSPACE/ckpt/Game-separated/D-llama31abl-A-magicsft/` 下每个 `global_step_*/defender`（第 100、200、… 步，加上最后停下时的那一个）和 `$MAGIC_DOCKER_WORKSPACE/logs/`（含 `CONVERGED`、`early_stop.txt`）传给 Wentse，评测由我们来做。
 
 ## 不用 Docker 的做法
 
@@ -84,7 +88,7 @@ nvidia-smi
 |---|---|---|---|
 | defender 底座 | Llama-3.1-8B-Instruct | abliterated 权重，template 和停止 token 用官方 Instruct 版 | 和 PSRO 同底座；只换权重 |
 | GPU | 每个角色 4 张（共 8 张） | 每个角色 2 张（共 4 张） | 算力 |
-| 回答长度上限 | 6144 | 2048 | 算力；只影响约 0.6% 的 defender 回答，截断的回答 reward 为 0（MAGIC 自带机制） |
+| 训练步数 | 300（第 200 步早停） | 最多 600，第 300 步后按验证分数收敛提前停 | abliterated 底座起点没有拒答能力，给两倍步数；第 200、300 步的 checkpoint 也保留，可以和原设置对照 |
 | reward 并发 | 1 | 16 | 只影响速度（judge 温度 0） |
 | 代码 | 公开分支 | 补一行 `seed_prompt` 未定义的 bug（`docker/magic/seed_prompt.patch`，main 分支也有这个 bug） | 不补无法运行 |
 | judge | Qwen3Guard | Qwen3Guard-Gen-8B | 论文没写大小；MAGIC 的 reward 代码只支持 Qwen3Guard 的输出格式 |

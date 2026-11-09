@@ -34,8 +34,9 @@ if [ "$ACTION" != prepare ]; then OPTIONS+=(--gpus "\"device=${GPU_DEVICES:-0,1,
 if [ "${DETACH:-0}" = 1 ]; then OPTIONS+=(-d); fi
 if [ -n "${CONTAINER_NAME:-}" ]; then OPTIONS+=(--name "$CONTAINER_NAME"); fi
 # Ports for Ray and the judge, in case another run shares the host network namespace settings.
-OPTIONS+=(-e "RAY_MASTER_PORT=${RAY_MASTER_PORT:-6391}" -e "JPORT=${JPORT:-18471}" -e "MAX_RESP=${MAX_RESP:-2048}"
-         -e "GPUS_PER_ROLE=${GPUS_PER_ROLE:-2}" -e "TOTAL_STEPS=${TOTAL_STEPS:-300}" -e "ROLLOUT_MEM=${ROLLOUT_MEM:-0.5}")
+OPTIONS+=(-e "RAY_MASTER_PORT=${RAY_MASTER_PORT:-6391}" -e "JPORT=${JPORT:-18471}" -e "MAX_RESP=${MAX_RESP:-6144}"
+         -e "GPUS_PER_ROLE=${GPUS_PER_ROLE:-2}" -e "TOTAL_STEPS=${TOTAL_STEPS:-600}" -e "ROLLOUT_MEM=${ROLLOUT_MEM:-0.5}"
+         -e "MIN_STEPS=${MIN_STEPS:-300}" -e "PATIENCE=${PATIENCE:-6}" -e "MIN_DELTA=${MIN_DELTA:-0.01}" -e "FORCE=${FORCE:-0}")
 
 case "$ACTION" in
   check)
