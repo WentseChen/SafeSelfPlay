@@ -21,4 +21,4 @@ if [ -d "$SSP_WS" ]; then mounts+=(-v "$SSP_WS:/ssp"); else echo "no PSRO/FSP wo
 docker run --rm "${mounts[@]}" \
   -e HF_TOKEN -e WANDB_API_KEY -e WANDB_ENTITY -e WANDB_PROJECT -e REPO_MAGIC -e REPO_PSRO -e REPO_FSP \
   -e DRY="${DRY:-0}" -e ONLY="${ONLY:-}" -e MIN_AGE="${MIN_AGE:-600}" -e HF_HUB_DISABLE_XET=1 \
-  python:3.11-slim bash -c 'pip install -q --root-user-action=ignore huggingface_hub wandb && python /ssp_upload.py'
+  python:3.11-slim bash -c 'pip install -q --root-user-action=ignore "huggingface_hub<2" wandb && python /ssp_upload.py'
